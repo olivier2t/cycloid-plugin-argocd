@@ -1,1 +1,3 @@
-# cycloid-plugin-argocd
+# Plugin ArgoCD
+
+Cycloid iframe plugin for ArgoCD.

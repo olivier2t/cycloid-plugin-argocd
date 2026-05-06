@@ -1,0 +1,7 @@
+- type: iframe
+  placement:
+    type: component
+    config:
+      tab_name: ArgoCD
+  widget:
+    query: "/?org=($ .org $)&env=($ .env $)"
