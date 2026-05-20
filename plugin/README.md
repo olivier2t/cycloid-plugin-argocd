@@ -73,7 +73,48 @@ curl -fsS -X POST http://localhost:8080/_cy/resync
 curl -fsS -X DELETE http://localhost:8080/_cy/plugin
 ```
 
-## About the “your connection is not private” warning
+## When the iframe renders as a blank box
+
+If the **ArgoCD** tab appears but the iframe area is empty, the two usual
+culprits are below. They are independent — fix whichever applies.
+
+### 1. ArgoCD refuses to be framed (`X-Frame-Options` / CSP)
+
+ArgoCD's API server ships, by default, with:
+
+```
+X-Frame-Options: sameorigin
+Content-Security-Policy: frame-ancestors 'self'
+```
+
+That tells the browser "only let pages on my own origin embed me in an
+iframe". When the Cycloid console embeds ArgoCD, the origins differ, the
+browser drops the response, and you see an empty iframe with only a
+warning in DevTools (no error in the page itself).
+
+To allow framing from Cycloid, patch the `argocd-cmd-params-cm` ConfigMap
+in the `argocd` namespace and restart `argocd-server`:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+  namespace: argocd
+data:
+  # Empty string disables X-Frame-Options entirely.
+  # Or set to "allow-from https://console.cycloid.io" for a single origin.
+  server.x.frame.options: ""
+  server.content.security.policy.frame.ancestors: "https://console.cycloid.io"
+```
+
+```sh
+kubectl -n argocd rollout restart deploy/argocd-server
+```
+
+Reload the Cycloid component page and the iframe should now render.
+
+### 2. The “your connection is not private” warning
 
 If `argocd.<org>-<env>.demo.cycloid.io` does not present a TLS certificate
 your browser trusts, the iframe will be blocked by the browser's "Your

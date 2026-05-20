@@ -1,2 +1,13 @@
 description: "Embed an ArgoCD app-of-apps view as a tab on Cycloid components."
 icon: "https://raw.githubusercontent.com/cncf/artwork/main/projects/argo/icon/color/argo-icon-color.svg"
+
+# The widget query in widgets.yaml references ($ .org $) and ($ .env $).
+# Without these relations, the placeholders stay empty and the iframe shows
+# the "Missing org or env" fallback page.
+relations:
+  - name: org
+    description: "Organization canonical of the current component"
+    selector: o.canonical
+  - name: env
+    description: "Environment canonical of the current component"
+    selector: e.canonical
