@@ -40,8 +40,9 @@ const DB_FILE = normaliseDbFile(process.env.DB_FILE);
 const SYNC_INSECURE_TLS = process.env.ARGOCD_INSECURE_TLS === "true";
 
 // Startup diagnostic: report which env vars the Plugin Manager actually
-// injects. Values are masked — we only care about NAMES so we don't leak
-// credentials in logs.
+// injects. We log PROXY_URL's value in full because it's the back-channel
+// shape we still need to validate; other potentially-sensitive values are
+// kept as booleans only.
 (() => {
   const presence = {
     ARGOCD_USERNAME: Boolean(ARGOCD_USERNAME),
@@ -63,6 +64,13 @@ const SYNC_INSECURE_TLS = process.env.ARGOCD_INSECURE_TLS === "true";
     .filter((k) => !k.startsWith("npm_") && !k.startsWith("_"))
     .sort();
   console.log(`[INFO] all injected env var names: ${injected.join(", ")}`);
+
+  if (PROXY_URL) {
+    // Truncate to 200 chars to keep the log line readable but still
+    // diagnostic.
+    const preview = PROXY_URL.length > 200 ? `${PROXY_URL.slice(0, 200)}…` : PROXY_URL;
+    console.log(`[INFO] PROXY_URL value: ${preview} (length=${PROXY_URL.length})`);
+  }
 })();
 
 // ArgoCD URLs follow a fixed convention. The plugin doesn't expose this as
@@ -127,15 +135,42 @@ function jsonRequest(
 // The Plugin Manager hands the container a pre-authenticated PROXY_URL; we
 // just GET ${PROXY_URL}${path} and the proxy attaches the install's identity
 // for us. No separate secret to pass.
+//
+// The Plugin Manager may inject PROXY_URL with or without a scheme. Handle
+// both shapes so we don't trip on `host:port/...` style values.
+function buildProxyUrl(path: string): URL {
+  let raw = PROXY_URL;
+  if (!/^https?:\/\//i.test(raw)) {
+    if (raw.startsWith("//")) {
+      raw = `http:${raw}`;
+    } else if (raw.startsWith("/")) {
+      // Pure path is meaningless without a host — surface a clear error.
+      throw new Error(
+        `PROXY_URL is a path with no host ('${PROXY_URL}'). Expected http(s)://host[:port]/…`,
+      );
+    } else {
+      raw = `http://${raw}`;
+    }
+  }
+  const joined = `${raw.replace(/\/+$/, "")}${path}`;
+  try {
+    return new URL(joined);
+  } catch (e) {
+    throw new Error(
+      `cannot parse proxy URL '${joined}' (PROXY_URL='${PROXY_URL}'): ${(e as Error).message}`,
+    );
+  }
+}
+
 async function cycloidProxyGet<T>(path: string): Promise<T> {
   if (!PROXY_URL) {
     throw new Error("PROXY_URL not set");
   }
-  const url = new URL(`${PROXY_URL}${path}`);
+  const url = buildProxyUrl(path);
   const res = await jsonRequest(url, { method: "GET" });
   if (res.status < 200 || res.status >= 300) {
     throw new Error(
-      `Cycloid proxy GET ${path} HTTP ${res.status}: ${res.body.slice(0, 200)}`,
+      `Cycloid proxy GET ${url.toString()} HTTP ${res.status}: ${res.body.slice(0, 200)}`,
     );
   }
   return JSON.parse(res.body) as T;
