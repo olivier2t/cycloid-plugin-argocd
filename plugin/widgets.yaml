@@ -1,7 +1,37 @@
-- type: iframe
+- type: table
   placement:
     type: component
     config:
       tab_name: ArgoCD
   widget:
-    query: "/?org=($ .org $)&env=($ .env $)"
+    query: >
+      SELECT a.name, a.sync_status, a.health_status, a.namespace, a.last_synced, a.url
+      FROM argocd_apps AS a
+      JOIN environments  AS e ON e.id = a.environment_id
+      JOIN organizations AS o ON o.id = e.organization_id
+    relations:
+      - name: "Organization Slug"
+        description: "The current Cycloid organization."
+        selector: "o.slug"
+      - name: "Environment Slug"
+        description: "The current Cycloid environment."
+        selector: "e.slug"
+    columns:
+      - value: name
+        title: Application
+        type: string
+      - value: sync_status
+        title: Sync
+        type: string
+      - value: health_status
+        title: Health
+        type: string
+      - value: namespace
+        title: Namespace
+        type: string
+      - value: last_synced
+        title: Last Synced
+        type: string
+      - value: url
+        title: Link
+        type: string

@@ -1,2 +1,31 @@
-description: "Embed an ArgoCD app-of-apps view as a tab on Cycloid components."
+description: "Import ArgoCD applications and show them as a tab on Cycloid components."
 icon: "https://raw.githubusercontent.com/cncf/artwork/main/projects/argo/icon/color/argo-icon-color.svg"
+
+configuration:
+  - name: "ArgoCD URL"
+    description: "Base URL of the ArgoCD API (e.g. https://argocd.example.com)."
+    key: argocd_url
+    widget: simple_text
+    type: string
+    required: true
+
+  - name: "ArgoCD API Token"
+    description: "Bearer token used to authenticate against the ArgoCD API. Generate one in ArgoCD with `argocd account generate-token`."
+    key: argocd_token
+    widget: simple_text
+    type: string
+    required: true
+
+  - name: "Cycloid Organization"
+    description: "Slug of the Cycloid organization this install belongs to. Used by the widget JOIN to scope rows to the current page."
+    key: cycloid_org_slug
+    widget: simple_text
+    type: string
+    required: true
+
+  - name: "Cycloid Environment"
+    description: "Slug of the Cycloid environment this install scopes to. All synced ArgoCD apps are attached to this environment."
+    key: cycloid_env_slug
+    widget: simple_text
+    type: string
+    required: true
