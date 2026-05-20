@@ -20,36 +20,49 @@ const ARGOCD_USERNAME = process.env.ARGOCD_USERNAME?.trim() ?? "";
 const ARGOCD_PASSWORD = process.env.ARGOCD_PASSWORD ?? "";
 
 // Injected by the Plugin Manager. Used to enumerate orgs/envs at sync time.
+// PROXY_URL is pre-authenticated by the Plugin Manager (the install's identity
+// is bound to the sandbox network and/or a path-embedded token), so we don't
+// need a separate PLUGIN_SECRET.
 const PROXY_URL = process.env.PROXY_URL?.replace(/\/+$/, "") ?? "";
-const PLUGIN_SECRET = process.env.PLUGIN_SECRET?.trim() ?? "";
 
-const DB_FILE = process.env.DB_FILE?.trim() || ":memory:";
+// The Plugin Manager passes DB_FILE as a `file:` URI (e.g.
+// `file:/var/db/plugin/data.sqlite`). node:sqlite expects a plain path,
+// so strip the scheme. Anything else (a bare path, `:memory:`) passes
+// through untouched.
+function normaliseDbFile(raw: string | undefined): string {
+  const v = raw?.trim();
+  if (!v) return ":memory:";
+  if (v.startsWith("file:")) return v.slice("file:".length) || ":memory:";
+  return v;
+}
+const DB_FILE = normaliseDbFile(process.env.DB_FILE);
 
 const SYNC_INSECURE_TLS = process.env.ARGOCD_INSECURE_TLS === "true";
 
-// Startup diagnostic: report which install/runtime env vars are present
-// (values masked) so we can tell what the Plugin Manager actually injects.
-// Also list any other env var names that look plugin-related, in case the
-// Plugin Manager uses different names than the ones we read above.
+// Startup diagnostic: report which env vars the Plugin Manager actually
+// injects. Values are masked — we only care about NAMES so we don't leak
+// credentials in logs.
 (() => {
   const presence = {
     ARGOCD_USERNAME: Boolean(ARGOCD_USERNAME),
     ARGOCD_PASSWORD: Boolean(ARGOCD_PASSWORD),
     PROXY_URL: Boolean(PROXY_URL),
-    PLUGIN_SECRET: Boolean(PLUGIN_SECRET),
     DB_FILE: Boolean(process.env.DB_FILE),
     PORT: Boolean(process.env.PORT),
   };
   console.log(`[INFO] config presence: ${JSON.stringify(presence)}`);
 
-  const knownNames = new Set(Object.keys(presence));
-  const interesting = Object.keys(process.env)
-    .filter((k) => /ARGO|CYCLOID|PROXY|PLUGIN|SECRET|TOKEN|CONFIG/i.test(k))
-    .filter((k) => !knownNames.has(k))
+  // Filter out POSIX/Node/Docker noise so the list is short and useful.
+  const SYSTEM_NAMES = new Set([
+    "PATH", "HOME", "HOSTNAME", "PWD", "SHELL", "SHLVL", "TERM",
+    "LANG", "LC_ALL", "TZ", "USER", "LOGNAME", "OLDPWD",
+    "NODE_VERSION", "NODE_OPTIONS", "YARN_VERSION", "NPM_CONFIG_LOGLEVEL",
+  ]);
+  const injected = Object.keys(process.env)
+    .filter((k) => !SYSTEM_NAMES.has(k))
+    .filter((k) => !k.startsWith("npm_") && !k.startsWith("_"))
     .sort();
-  if (interesting.length > 0) {
-    console.log(`[INFO] other plugin-related env var names: ${interesting.join(", ")}`);
-  }
+  console.log(`[INFO] all injected env var names: ${injected.join(", ")}`);
 })();
 
 // ArgoCD URLs follow a fixed convention. The plugin doesn't expose this as
@@ -111,12 +124,14 @@ function jsonRequest(
 }
 
 // ─── Cycloid proxy client (org/env discovery) ─────────────────────────────────
+// The Plugin Manager hands the container a pre-authenticated PROXY_URL; we
+// just GET ${PROXY_URL}${path} and the proxy attaches the install's identity
+// for us. No separate secret to pass.
 async function cycloidProxyGet<T>(path: string): Promise<T> {
-  if (!PROXY_URL || !PLUGIN_SECRET) {
-    throw new Error("PROXY_URL or PLUGIN_SECRET not set");
+  if (!PROXY_URL) {
+    throw new Error("PROXY_URL not set");
   }
-  const sep = path.includes("?") ? "&" : "?";
-  const url = new URL(`${PROXY_URL}${path}${sep}secret=${PLUGIN_SECRET}`);
+  const url = new URL(`${PROXY_URL}${path}`);
   const res = await jsonRequest(url, { method: "GET" });
   if (res.status < 200 || res.status >= 300) {
     throw new Error(
@@ -204,7 +219,7 @@ let resyncRunning = false;
 
 async function resync(): Promise<{ started: boolean; reason?: string }> {
   if (resyncRunning) return { started: false, reason: "already running" };
-  if (!ARGOCD_USERNAME || !ARGOCD_PASSWORD || !PROXY_URL || !PLUGIN_SECRET) {
+  if (!ARGOCD_USERNAME || !ARGOCD_PASSWORD || !PROXY_URL) {
     return { started: false, reason: "missing configuration" };
   }
   resyncRunning = true;

@@ -64,9 +64,9 @@ No Bun, no `just`, no third-party libraries, no build step.
 
 1. At start-up the plugin opens its SQLite database, applies `schema.sql`,
    then performs an initial sync.
-2. The sync first asks the **Cycloid backend** (via `PROXY_URL` +
-   `PLUGIN_SECRET`, both injected by the Plugin Manager) for the list of
-   organizations and, for each, the list of projects with their
+2. The sync first asks the **Cycloid backend** (via `PROXY_URL`, a
+   pre-authenticated back-channel injected by the Plugin Manager) for the
+   list of organizations and, for each, the list of projects with their
    `environments[]`. From that it builds the full set of `(org, env)` pairs.
 3. For each `(org, env)` pair, the plugin logs into
    `argocd.<org>-<env>.demo.cycloid.io` and pulls `/api/v1/applications`.
@@ -116,9 +116,9 @@ we log in again on each sync.
 
 The org/env canonicals themselves are **not** install-time fields either.
 They are discovered at sync time from the Cycloid backend via the
-`PROXY_URL` / `PLUGIN_SECRET` environment variables, which the Plugin
-Manager injects automatically. You don't set those — they are part of the
-runtime contract between the plugin and the Plugin Manager.
+`PROXY_URL` environment variable, which the Plugin Manager injects as a
+pre-authenticated URL. You don't set it — it is part of the runtime
+contract between the plugin and the Plugin Manager.
 
 Optional, set directly in the container (not in the install form):
 
@@ -208,18 +208,18 @@ curl -sS -X POST \
 
 ## Local development
 
-`PROXY_URL` and `PLUGIN_SECRET` are normally injected by the Plugin Manager.
-For local dev you can either point at a real Cycloid backend (you'll need
-a plugin install secret — currently only visible to the Plugin Manager,
-not exposed in the public CLI) or accept that discovery will no-op and the
-sync will report `missing configuration`.
+`PROXY_URL` is normally injected by the Plugin Manager as a
+pre-authenticated URL. Out of the sandbox you can't reproduce that, so for
+local dev set it to a regular Cycloid API URL together with `CY_API_KEY` /
+`CY_ORG` if you want discovery to succeed — or just leave it unset and
+discovery will no-op (the sync will report `missing configuration`, which
+is fine).
 
 ```sh
 PORT=8080 \
 ARGOCD_USERNAME=admin \
 ARGOCD_PASSWORD='your-password' \
 PROXY_URL=https://api.cycloid.io \
-PLUGIN_SECRET='<plugin install secret>' \
 DB_FILE=/tmp/argocd-plugin.db \
 node --experimental-strip-types --experimental-sqlite --watch server.ts
 ```
@@ -269,8 +269,8 @@ per-`(org, env)` from the Cycloid canonicals (see "Install form" above).
 
 `1.4.0` removed `cycloid_org_slug` and `cycloid_env_slug` from the install
 form. The plugin now discovers organizations and environments at sync time
-through the Cycloid backend (via `PROXY_URL` / `PLUGIN_SECRET` injected by
-the Plugin Manager) and syncs ArgoCD apps for **every** `(org, env)` pair
-in the install's scope. A single install is enough — no more "one install
-per environment". Uninstall, publish `1.4.0`, reinstall with only
-`argocd_username` + `argocd_password`, re-enable per-component.
+through the Cycloid backend (via the pre-authenticated `PROXY_URL`
+injected by the Plugin Manager) and syncs ArgoCD apps for **every**
+`(org, env)` pair in the install's scope. A single install is enough — no
+more "one install per environment". Uninstall, publish `1.4.0`, reinstall
+with only `argocd_username` + `argocd_password`, re-enable per-component.
