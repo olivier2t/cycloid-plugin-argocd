@@ -27,6 +27,31 @@ const DB_FILE = process.env.DB_FILE?.trim() || ":memory:";
 
 const SYNC_INSECURE_TLS = process.env.ARGOCD_INSECURE_TLS === "true";
 
+// Startup diagnostic: report which install/runtime env vars are present
+// (values masked) so we can tell what the Plugin Manager actually injects.
+// Also list any other env var names that look plugin-related, in case the
+// Plugin Manager uses different names than the ones we read above.
+(() => {
+  const presence = {
+    ARGOCD_USERNAME: Boolean(ARGOCD_USERNAME),
+    ARGOCD_PASSWORD: Boolean(ARGOCD_PASSWORD),
+    PROXY_URL: Boolean(PROXY_URL),
+    PLUGIN_SECRET: Boolean(PLUGIN_SECRET),
+    DB_FILE: Boolean(process.env.DB_FILE),
+    PORT: Boolean(process.env.PORT),
+  };
+  console.log(`[INFO] config presence: ${JSON.stringify(presence)}`);
+
+  const knownNames = new Set(Object.keys(presence));
+  const interesting = Object.keys(process.env)
+    .filter((k) => /ARGO|CYCLOID|PROXY|PLUGIN|SECRET|TOKEN|CONFIG/i.test(k))
+    .filter((k) => !knownNames.has(k))
+    .sort();
+  if (interesting.length > 0) {
+    console.log(`[INFO] other plugin-related env var names: ${interesting.join(", ")}`);
+  }
+})();
+
 // ArgoCD URLs follow a fixed convention. The plugin doesn't expose this as
 // configuration on purpose — the install form only carries credentials.
 function argocdBaseUrl(orgSlug: string, envSlug: string): string {

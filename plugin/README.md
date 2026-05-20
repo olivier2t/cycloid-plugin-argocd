@@ -8,7 +8,7 @@ Each row represents one ArgoCD application. Columns:
 | Application | Sync | Health | Namespace | Last Synced | Link |
 
 Data is refreshed at container start-up and whenever you click **Resync** in
-the Cycloid UI (or call `cy plugin resync argocd`).
+the Cycloid UI.
 
 ## Why this is a `table` widget, not an `iframe`
 
@@ -155,24 +155,64 @@ upgrade from an earlier `iframe + component` version of this plugin.
 ## Build, push, install
 
 ```sh
-docker build -t cycloid-docker-registry:5000/cycloid/argocd:1.4.0 .
-docker push cycloid-docker-registry:5000/cycloid/argocd:1.4.0
-
-cy plugin registry plugin version publish internal argocd \
-  --docker-image cycloid-docker-registry:5000/cycloid/argocd:1.4.0
-cy plugin install --version-id <id> \
-  --config argocd_username=<user> \
-  --config argocd_password=<password>
+docker build -t docker.io/<your-namespace>/cycloid-plugin-argocd:1.4.0 .
+docker push docker.io/<your-namespace>/cycloid-plugin-argocd:1.4.0
 ```
 
 The image tag must be a valid semantic version (e.g. `1.4.0`).
 
+### Publish & install via the Cycloid console (recommended)
+
+The Cycloid CLI (`cy`) in current public releases does **not** ship a
+`plugin` subcommand. Use the Cycloid console UI instead:
+
+1. **Plugin Registry → Plugins → ArgoCD → New version.** Paste the Docker
+   image reference (e.g. `docker.io/<ns>/cycloid-plugin-argocd:1.4.0`).
+   Wait until validation reports `Successfully finished`.
+2. **Plugins → ArgoCD → Install** (or **Update** if a previous version was
+   installed). Fill in `argocd_username` and `argocd_password`. Save.
+3. **For each component that should show the tab**, toggle the ArgoCD
+   plugin on in the component's settings page, or call the API directly
+   (see next section).
+
+### Publish & install via the REST API
+
+If you need to script it, the relevant endpoints are:
+
+```sh
+# Discover the registry id, plugin id, and the new version id
+curl -sS -H "Authorization: Bearer $CY_API_KEY" \
+  "$CY_API_URL/organizations/$CY_ORG/plugin_registries" | jq .
+
+REGISTRY_ID=...   # from the response above
+PLUGIN_ID=...     # from /organizations/$CY_ORG/plugins, .data[] | select(.name=="argocd") | .id
+
+# Publish a new version (returns the new version's id)
+curl -sS -X POST \
+  -H "Authorization: Bearer $CY_API_KEY" \
+  -H "Content-Type: application/vnd.cycloid.io.v1+json" \
+  -d "{\"url\":\"docker.io/<ns>/cycloid-plugin-argocd:1.4.0\"}" \
+  "$CY_API_URL/organizations/$CY_ORG/plugin_registries/$REGISTRY_ID/plugins/$PLUGIN_ID/versions" \
+  | jq .
+
+VERSION_ID=...    # .data.id from the response above
+
+# Install the version with configuration values from manifest.yaml
+curl -sS -X POST \
+  -H "Authorization: Bearer $CY_API_KEY" \
+  -H "Content-Type: application/vnd.cycloid.io.v1+json" \
+  -d '{"configuration":{"argocd_username":"<user>","argocd_password":"<password>"}}' \
+  "$CY_API_URL/organizations/$CY_ORG/plugin_registries/$REGISTRY_ID/plugins/$PLUGIN_ID/versions/$VERSION_ID/install" \
+  | jq .
+```
+
 ## Local development
 
 `PROXY_URL` and `PLUGIN_SECRET` are normally injected by the Plugin Manager.
-For local dev you can either point at a real Cycloid backend (using a
-plugin install secret obtained from `cy plugin show argocd`) or accept that
-discovery will no-op and the sync will report `missing configuration`.
+For local dev you can either point at a real Cycloid backend (you'll need
+a plugin install secret — currently only visible to the Plugin Manager,
+not exposed in the public CLI) or accept that discovery will no-op and the
+sync will report `missing configuration`.
 
 ```sh
 PORT=8080 \
@@ -201,31 +241,29 @@ sqlite3 /tmp/argocd-plugin.db 'SELECT name, sync_status, health_status FROM argo
 
 ## Upgrading from earlier versions
 
+Any time the install form changes (a `key:` is added, renamed, or removed
+in `manifest.yaml`), the existing install becomes stale and must be
+uninstalled and reinstalled. From the Cycloid console: **Plugins → ArgoCD
+→ Uninstall**, then follow "Publish & install via the Cycloid console"
+above with the new version. The REST equivalent is `DELETE
+/organizations/$CY_ORG/plugins/$PLUGIN_INSTALL_ID`.
+
 ### From `iframe + component` (≤ 1.0.5)
 
-1. `cy plugin uninstall argocd`
-2. Publish the latest version per the build/push/install steps above.
-3. Install with the two required config fields.
-4. Enable the plugin per-component using the API call in the "gotcha"
-   section, or via the UI toggle on each component page.
+Switched the widget from `iframe` to `table`, introduced `schema.sql`,
+local SQLite, and a real `server.ts`-driven sync. Uninstall and reinstall.
+After reinstall you also need to enable the plugin on each component (see
+the "One-time per-component enable" gotcha above).
 
 ### From `1.1.0` (token-based auth)
 
-The install form changed in `1.2.0` — `argocd_token` was replaced with
-`argocd_username` + `argocd_password`. Any install script using
-`--config argocd_token=…` will fail with `missing configuration` at sync time.
-
-1. `cy plugin uninstall argocd`
-2. Publish the latest version.
-3. Reinstall with the new credential fields.
-4. Re-enable per-component.
+`1.2.0` replaced `argocd_token` with `argocd_username` + `argocd_password`.
+Uninstall and reinstall with the new credential fields.
 
 ### From `1.2.0` (explicit ArgoCD URL)
 
 `1.3.0` removed `argocd_url` from the install form — it is now derived
 per-`(org, env)` from the Cycloid canonicals (see "Install form" above).
-Any install script using `--config argocd_url=…` will be rejected by the
-install API.
 
 ### From `1.3.0` (Cycloid org/env in install form)
 
@@ -234,9 +272,5 @@ form. The plugin now discovers organizations and environments at sync time
 through the Cycloid backend (via `PROXY_URL` / `PLUGIN_SECRET` injected by
 the Plugin Manager) and syncs ArgoCD apps for **every** `(org, env)` pair
 in the install's scope. A single install is enough — no more "one install
-per environment".
-
-1. `cy plugin uninstall argocd`
-2. Publish `1.4.0`.
-3. Reinstall with only `argocd_username` and `argocd_password`.
-4. Re-enable per-component.
+per environment". Uninstall, publish `1.4.0`, reinstall with only
+`argocd_username` + `argocd_password`, re-enable per-component.
