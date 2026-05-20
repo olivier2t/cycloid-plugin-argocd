@@ -28,10 +28,10 @@ displayed a tab. See the `iframe-attempt` git history for that path.
 
 | File             | Purpose                                                              |
 |------------------|----------------------------------------------------------------------|
-| `manifest.yaml`  | Install form: ArgoCD URL + token, Cycloid org + env slugs.           |
+| `manifest.yaml`  | Install form: ArgoCD username + password only.                       |
 | `widgets.yaml`   | One `table` widget on `placement: component`, tab name **ArgoCD**.   |
 | `schema.sql`     | SQLite tables: `organizations`, `environments`, `argocd_apps`.       |
-| `server.ts`      | Node 22 server: SQLite open + migrate, ArgoCD sync, `/_cy/*` API.    |
+| `server.ts`      | Node 22 server: SQLite open + migrate, org/env discovery, sync.      |
 | `Dockerfile`     | `node:22-trixie-slim`, runs `.ts` directly with type-strip + sqlite. |
 | `package.json`   | Declares `type: module`. No runtime dependencies.                    |
 
@@ -40,10 +40,18 @@ No Bun, no `just`, no third-party libraries, no build step.
 ## How it works
 
 ```
-┌──────────────────┐    sync (REST)    ┌─────────────────┐
-│ This container   │ ────────────────▶ │ ArgoCD API      │
-│ (Node 22)        │                   │ /api/v1/apps    │
-└─────┬────────────┘                   └─────────────────┘
+┌──────────────────┐    list orgs/projects    ┌──────────────────┐
+│ This container   │ ───────────────────────▶ │ Cycloid backend  │
+│ (Node 22)        │ ◀─── (org, env) pairs    │ via PROXY_URL    │
+└─────┬────────────┘                          └──────────────────┘
+      │
+      │ for each (org, env): login + GET /api/v1/applications
+      ▼
+┌──────────────────┐
+│ ArgoCD instance  │
+│ argocd.<org>-    │
+│  <env>.demo…     │
+└─────┬────────────┘
       │ INSERTs into local SQLite (/plugin/data.db or in-memory)
       ▼
 ┌─────────────────────────────┐   widget SQL    ┌──────────────────┐
@@ -55,26 +63,62 @@ No Bun, no `just`, no third-party libraries, no build step.
 ```
 
 1. At start-up the plugin opens its SQLite database, applies `schema.sql`,
-   then performs an initial sync against the ArgoCD API.
-2. The sync deletes the `organizations` row (cascade-deletes everything else)
-   and re-creates one row keyed by `CYCLOID_ORG_SLUG` / `CYCLOID_ENV_SLUG`,
-   then INSERTs every ArgoCD application as one row in `argocd_apps`.
-3. When the Cycloid console renders a component page, it executes the
+   then performs an initial sync.
+2. The sync first asks the **Cycloid backend** (via `PROXY_URL` +
+   `PLUGIN_SECRET`, both injected by the Plugin Manager) for the list of
+   organizations and, for each, the list of projects with their
+   `environments[]`. From that it builds the full set of `(org, env)` pairs.
+3. For each `(org, env)` pair, the plugin logs into
+   `argocd.<org>-<env>.demo.cycloid.io` and pulls `/api/v1/applications`.
+   Per-pair failures are logged and skipped; the sync continues with the
+   other pairs.
+4. The sync wipes the `organizations` row (cascade-deletes everything else)
+   and re-inserts one `organizations` / `environments` row per discovered
+   pair, plus every ArgoCD application as one row in `argocd_apps`.
+5. When the Cycloid console renders a component page, it executes the
    widget's `SELECT` against this SQLite database, JOIN-ing on the current
-   `o.slug` / `e.slug` (declared as `relations:` in `widgets.yaml`).
-4. The user clicks **Resync** in the Cycloid UI when they want fresh data.
+   component's `o.slug` / `e.slug` (declared as `relations:` in
+   `widgets.yaml`).
+6. The user clicks **Resync** in the Cycloid UI when they want fresh data.
 
 ## Install form
 
 These fields appear in **Install ArgoCD** in the Cycloid UI and are injected
 as `UPPER_CASE` environment variables into the container at runtime.
 
-| `key`              | Env var             | Required | Description                                                              |
-|--------------------|---------------------|----------|--------------------------------------------------------------------------|
-| `argocd_url`       | `ARGOCD_URL`        | yes      | Base URL of the ArgoCD API (e.g. `https://argocd.example.com`).          |
-| `argocd_token`     | `ARGOCD_TOKEN`      | yes      | Bearer token. `argocd account generate-token` in ArgoCD generates one.   |
-| `cycloid_org_slug` | `CYCLOID_ORG_SLUG`  | yes      | Cycloid organization slug to attach this data to (one install per org).  |
-| `cycloid_env_slug` | `CYCLOID_ENV_SLUG`  | yes      | Cycloid environment slug to attach this data to (one install per env).   |
+| `key`              | Env var             | Required | Description                                                |
+|--------------------|---------------------|----------|------------------------------------------------------------|
+| `argocd_username`  | `ARGOCD_USERNAME`   | yes      | Local ArgoCD account username used to log in.              |
+| `argocd_password`  | `ARGOCD_PASSWORD`   | yes      | Password for the ArgoCD account. Treat as sensitive.       |
+
+The same credentials are used for **every** ArgoCD instance the plugin
+discovers, so the local ArgoCD account must exist with the same
+username/password on each `argocd.<org>-<env>.demo.cycloid.io` you want to
+import from.
+
+The ArgoCD URL is **not** an install-time field. The plugin builds it
+per-environment from the Cycloid org and env canonicals following this
+convention:
+
+```
+https://argocd.<organization_canonical>-<environment_canonical>.demo.cycloid.io
+```
+
+For example, an env `arhs` in org `cycloid-demo-cmp` is fetched from
+`https://argocd.cycloid-demo-cmp-arhs.demo.cycloid.io/api/v1/applications`.
+If your ArgoCD instances don't follow this pattern, fork this plugin and
+adjust `argocdBaseUrl()` in `server.ts`.
+
+Authentication uses ArgoCD's session API: at every resync the plugin POSTs
+the credentials to `<derived_url>/api/v1/session`, receives a JWT, and uses
+it as a Bearer token for `/api/v1/applications`. The JWT is never persisted;
+we log in again on each sync.
+
+The org/env canonicals themselves are **not** install-time fields either.
+They are discovered at sync time from the Cycloid backend via the
+`PROXY_URL` / `PLUGIN_SECRET` environment variables, which the Plugin
+Manager injects automatically. You don't set those — they are part of the
+runtime contract between the plugin and the Plugin Manager.
 
 Optional, set directly in the container (not in the install form):
 
@@ -111,28 +155,31 @@ upgrade from an earlier `iframe + component` version of this plugin.
 ## Build, push, install
 
 ```sh
-docker build -t cycloid-docker-registry:5000/cycloid/argocd:1.1.0 .
-docker push cycloid-docker-registry:5000/cycloid/argocd:1.1.0
+docker build -t cycloid-docker-registry:5000/cycloid/argocd:1.4.0 .
+docker push cycloid-docker-registry:5000/cycloid/argocd:1.4.0
 
 cy plugin registry plugin version publish internal argocd \
-  --docker-image cycloid-docker-registry:5000/cycloid/argocd:1.1.0
+  --docker-image cycloid-docker-registry:5000/cycloid/argocd:1.4.0
 cy plugin install --version-id <id> \
-  --config argocd_url=https://argocd.example.com \
-  --config argocd_token=<token> \
-  --config cycloid_org_slug=<org> \
-  --config cycloid_env_slug=<env>
+  --config argocd_username=<user> \
+  --config argocd_password=<password>
 ```
 
-The image tag must be a valid semantic version (e.g. `1.1.0`).
+The image tag must be a valid semantic version (e.g. `1.4.0`).
 
 ## Local development
 
+`PROXY_URL` and `PLUGIN_SECRET` are normally injected by the Plugin Manager.
+For local dev you can either point at a real Cycloid backend (using a
+plugin install secret obtained from `cy plugin show argocd`) or accept that
+discovery will no-op and the sync will report `missing configuration`.
+
 ```sh
 PORT=8080 \
-ARGOCD_URL=https://argocd.example.com \
-ARGOCD_TOKEN=$(argocd account generate-token) \
-CYCLOID_ORG_SLUG=acme \
-CYCLOID_ENV_SLUG=staging \
+ARGOCD_USERNAME=admin \
+ARGOCD_PASSWORD='your-password' \
+PROXY_URL=https://api.cycloid.io \
+PLUGIN_SECRET='<plugin install secret>' \
 DB_FILE=/tmp/argocd-plugin.db \
 node --experimental-strip-types --experimental-sqlite --watch server.ts
 ```
@@ -152,10 +199,44 @@ Inspect the synced data:
 sqlite3 /tmp/argocd-plugin.db 'SELECT name, sync_status, health_status FROM argocd_apps'
 ```
 
-## Upgrading from `iframe + component` (≤ 1.0.5)
+## Upgrading from earlier versions
+
+### From `iframe + component` (≤ 1.0.5)
 
 1. `cy plugin uninstall argocd`
-2. Publish `1.1.0` per the build/push/install steps above.
-3. Install with the four required config fields.
+2. Publish the latest version per the build/push/install steps above.
+3. Install with the two required config fields.
 4. Enable the plugin per-component using the API call in the "gotcha"
    section, or via the UI toggle on each component page.
+
+### From `1.1.0` (token-based auth)
+
+The install form changed in `1.2.0` — `argocd_token` was replaced with
+`argocd_username` + `argocd_password`. Any install script using
+`--config argocd_token=…` will fail with `missing configuration` at sync time.
+
+1. `cy plugin uninstall argocd`
+2. Publish the latest version.
+3. Reinstall with the new credential fields.
+4. Re-enable per-component.
+
+### From `1.2.0` (explicit ArgoCD URL)
+
+`1.3.0` removed `argocd_url` from the install form — it is now derived
+per-`(org, env)` from the Cycloid canonicals (see "Install form" above).
+Any install script using `--config argocd_url=…` will be rejected by the
+install API.
+
+### From `1.3.0` (Cycloid org/env in install form)
+
+`1.4.0` removed `cycloid_org_slug` and `cycloid_env_slug` from the install
+form. The plugin now discovers organizations and environments at sync time
+through the Cycloid backend (via `PROXY_URL` / `PLUGIN_SECRET` injected by
+the Plugin Manager) and syncs ArgoCD apps for **every** `(org, env)` pair
+in the install's scope. A single install is enough — no more "one install
+per environment".
+
+1. `cy plugin uninstall argocd`
+2. Publish `1.4.0`.
+3. Reinstall with only `argocd_username` and `argocd_password`.
+4. Re-enable per-component.

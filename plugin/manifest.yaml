@@ -1,31 +1,22 @@
 description: "Import ArgoCD applications and show them as a tab on Cycloid components."
 icon: "https://raw.githubusercontent.com/cncf/artwork/main/projects/argo/icon/color/argo-icon-color.svg"
 
+# The plugin discovers organizations and environments at sync time via the
+# Cycloid Plugin Manager proxy (PROXY_URL / PLUGIN_SECRET), so the operator
+# only has to supply the ArgoCD credentials. Org/env slugs are no longer in
+# the install form; they're derived from each component's context at
+# widget-render time (via the JOIN relations declared in widgets.yaml).
 configuration:
-  - name: "ArgoCD URL"
-    description: "Base URL of the ArgoCD API (e.g. https://argocd.example.com)."
-    key: argocd_url
+  - name: "ArgoCD Username"
+    description: "Local ArgoCD account used to log into the ArgoCD API."
+    key: argocd_username
     widget: simple_text
     type: string
     required: true
 
-  - name: "ArgoCD API Token"
-    description: "Bearer token used to authenticate against the ArgoCD API. Generate one in ArgoCD with `argocd account generate-token`."
-    key: argocd_token
-    widget: simple_text
-    type: string
-    required: true
-
-  - name: "Cycloid Organization"
-    description: "Slug of the Cycloid organization this install belongs to. Used by the widget JOIN to scope rows to the current page."
-    key: cycloid_org_slug
-    widget: simple_text
-    type: string
-    required: true
-
-  - name: "Cycloid Environment"
-    description: "Slug of the Cycloid environment this install scopes to. All synced ArgoCD apps are attached to this environment."
-    key: cycloid_env_slug
+  - name: "ArgoCD Password"
+    description: "Password for the ArgoCD account above. Stored as a plugin secret; treat this field as sensitive."
+    key: argocd_password
     widget: simple_text
     type: string
     required: true

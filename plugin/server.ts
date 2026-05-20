@@ -15,13 +15,23 @@ if (!Number.isFinite(port) || port <= 0) {
   process.exit(1);
 }
 
-const ARGOCD_URL = process.env.ARGOCD_URL?.trim() ?? "";
-const ARGOCD_TOKEN = process.env.ARGOCD_TOKEN?.trim() ?? "";
-const CYCLOID_ORG_SLUG = process.env.CYCLOID_ORG_SLUG?.trim() ?? "";
-const CYCLOID_ENV_SLUG = process.env.CYCLOID_ENV_SLUG?.trim() ?? "";
+// Install-form values (capitalised manifest keys → env vars).
+const ARGOCD_USERNAME = process.env.ARGOCD_USERNAME?.trim() ?? "";
+const ARGOCD_PASSWORD = process.env.ARGOCD_PASSWORD ?? "";
+
+// Injected by the Plugin Manager. Used to enumerate orgs/envs at sync time.
+const PROXY_URL = process.env.PROXY_URL?.replace(/\/+$/, "") ?? "";
+const PLUGIN_SECRET = process.env.PLUGIN_SECRET?.trim() ?? "";
+
 const DB_FILE = process.env.DB_FILE?.trim() || ":memory:";
 
 const SYNC_INSECURE_TLS = process.env.ARGOCD_INSECURE_TLS === "true";
+
+// ArgoCD URLs follow a fixed convention. The plugin doesn't expose this as
+// configuration on purpose — the install form only carries credentials.
+function argocdBaseUrl(orgSlug: string, envSlug: string): string {
+  return `https://argocd.${orgSlug}-${envSlug}.demo.cycloid.io`;
+}
 
 // ─── Database ─────────────────────────────────────────────────────────────────
 const db = new DatabaseSync(DB_FILE);
@@ -30,6 +40,101 @@ db.exec("PRAGMA foreign_keys = ON");
 const schema = readFileSync(new URL("./schema.sql", import.meta.url), "utf8");
 db.exec(schema);
 console.log(`[INFO] sqlite ready (file=${DB_FILE})`);
+
+// ─── Generic JSON HTTP helper ─────────────────────────────────────────────────
+type ReqInit = {
+  method: "GET" | "POST";
+  headers?: Record<string, string>;
+  body?: string;
+  rejectUnauthorized?: boolean;
+};
+
+function jsonRequest(
+  target: URL,
+  init: ReqInit,
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const isHttps = target.protocol === "https:";
+    const request = isHttps ? httpsRequest : httpRequest;
+    const headers: Record<string, string> = { ...(init.headers ?? {}) };
+    if (init.body !== undefined) {
+      headers["content-type"] ??= "application/json";
+      headers["content-length"] = String(Buffer.byteLength(init.body));
+    }
+    const req = request(
+      target,
+      {
+        method: init.method,
+        headers,
+        rejectUnauthorized: isHttps ? init.rejectUnauthorized : undefined,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => {
+          resolve({
+            status: res.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+      },
+    );
+    req.on("error", reject);
+    if (init.body !== undefined) req.write(init.body);
+    req.end();
+  });
+}
+
+// ─── Cycloid proxy client (org/env discovery) ─────────────────────────────────
+async function cycloidProxyGet<T>(path: string): Promise<T> {
+  if (!PROXY_URL || !PLUGIN_SECRET) {
+    throw new Error("PROXY_URL or PLUGIN_SECRET not set");
+  }
+  const sep = path.includes("?") ? "&" : "?";
+  const url = new URL(`${PROXY_URL}${path}${sep}secret=${PLUGIN_SECRET}`);
+  const res = await jsonRequest(url, { method: "GET" });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(
+      `Cycloid proxy GET ${path} HTTP ${res.status}: ${res.body.slice(0, 200)}`,
+    );
+  }
+  return JSON.parse(res.body) as T;
+}
+
+type CyOrganization = { canonical?: string };
+type CyProject = { canonical?: string; environments?: string[] };
+type CyListResponse<T> = { data?: T[] };
+
+async function discoverOrgsAndEnvs(): Promise<Array<{ org: string; env: string }>> {
+  const out: Array<{ org: string; env: string }> = [];
+  const orgsResp = await cycloidProxyGet<CyListResponse<CyOrganization>>("/organizations");
+  const orgs = orgsResp.data ?? [];
+  for (const o of orgs) {
+    if (!o.canonical) continue;
+    let projectsResp: CyListResponse<CyProject>;
+    try {
+      projectsResp = await cycloidProxyGet<CyListResponse<CyProject>>(
+        `/organizations/${encodeURIComponent(o.canonical)}/projects`,
+      );
+    } catch (err) {
+      console.warn(`[WARN] discovery: skipping org ${o.canonical}: ${(err as Error).message}`);
+      continue;
+    }
+    for (const p of projectsResp.data ?? []) {
+      for (const env of p.environments ?? []) {
+        out.push({ org: o.canonical, env });
+      }
+    }
+  }
+  // Deduplicate (project1.envs and project2.envs may overlap).
+  const seen = new Set<string>();
+  return out.filter((p) => {
+    const key = `${p.org}\u0000${p.env}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 // ─── ArgoCD client ────────────────────────────────────────────────────────────
 type ArgoApp = {
@@ -42,44 +147,31 @@ type ArgoApp = {
   };
 };
 
-function fetchArgoCDApps(): Promise<ArgoApp[]> {
-  return new Promise((resolve, reject) => {
-    if (!ARGOCD_URL || !ARGOCD_TOKEN) {
-      reject(new Error("ARGOCD_URL or ARGOCD_TOKEN not set"));
-      return;
-    }
-    const target = new URL("/api/v1/applications", ARGOCD_URL);
-    const isHttps = target.protocol === "https:";
-    const request = isHttps ? httpsRequest : httpRequest;
-    const req = request(
-      target,
-      {
-        method: "GET",
-        headers: { authorization: `Bearer ${ARGOCD_TOKEN}` },
-        // Self-signed ArgoCD installations are common; opt-in via env var.
-        rejectUnauthorized: isHttps ? !SYNC_INSECURE_TLS : undefined,
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (c: Buffer) => chunks.push(c));
-        res.on("end", () => {
-          const body = Buffer.concat(chunks).toString("utf8");
-          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-            reject(new Error(`ArgoCD HTTP ${res.statusCode}: ${body.slice(0, 200)}`));
-            return;
-          }
-          try {
-            const parsed = JSON.parse(body) as { items?: ArgoApp[] };
-            resolve(parsed.items ?? []);
-          } catch (err) {
-            reject(err);
-          }
-        });
-      },
-    );
-    req.on("error", reject);
-    req.end();
+async function argocdLogin(baseUrl: string): Promise<string> {
+  const res = await jsonRequest(new URL("/api/v1/session", baseUrl), {
+    method: "POST",
+    body: JSON.stringify({ username: ARGOCD_USERNAME, password: ARGOCD_PASSWORD }),
+    rejectUnauthorized: !SYNC_INSECURE_TLS,
   });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`login HTTP ${res.status}: ${res.body.slice(0, 200)}`);
+  }
+  const parsed = JSON.parse(res.body) as { token?: string };
+  if (!parsed.token) throw new Error("login: no token in response");
+  return parsed.token;
+}
+
+async function argocdListApps(baseUrl: string, token: string): Promise<ArgoApp[]> {
+  const res = await jsonRequest(new URL("/api/v1/applications", baseUrl), {
+    method: "GET",
+    headers: { authorization: `Bearer ${token}` },
+    rejectUnauthorized: !SYNC_INSECURE_TLS,
+  });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`applications HTTP ${res.status}: ${res.body.slice(0, 200)}`);
+  }
+  const parsed = JSON.parse(res.body) as { items?: ArgoApp[] };
+  return parsed.items ?? [];
 }
 
 // ─── Resync ───────────────────────────────────────────────────────────────────
@@ -87,54 +179,88 @@ let resyncRunning = false;
 
 async function resync(): Promise<{ started: boolean; reason?: string }> {
   if (resyncRunning) return { started: false, reason: "already running" };
-  if (!ARGOCD_URL || !ARGOCD_TOKEN || !CYCLOID_ORG_SLUG || !CYCLOID_ENV_SLUG) {
+  if (!ARGOCD_USERNAME || !ARGOCD_PASSWORD || !PROXY_URL || !PLUGIN_SECRET) {
     return { started: false, reason: "missing configuration" };
   }
   resyncRunning = true;
 
   try {
     console.log("[INFO] resync: starting");
-    const apps = await fetchArgoCDApps();
-    console.log(`[INFO] resync: fetched ${apps.length} apps from ArgoCD`);
 
-    const orgId = `org-${CYCLOID_ORG_SLUG}`;
-    const envId = `env-${CYCLOID_ORG_SLUG}-${CYCLOID_ENV_SLUG}`;
-    const baseUrl = ARGOCD_URL.replace(/\/+$/, "");
+    let pairs: Array<{ org: string; env: string }>;
+    try {
+      pairs = await discoverOrgsAndEnvs();
+    } catch (err) {
+      console.error(`[ERROR] resync: discovery failed: ${(err as Error).message}`);
+      return { started: false, reason: "discovery failed" };
+    }
+    console.log(`[INFO] resync: discovered ${pairs.length} (org, env) pair(s)`);
+
+    // Collect ArgoCD apps per pair before opening the SQLite transaction, so
+    // a slow or failing ArgoCD instance doesn't hold a write lock.
+    const synced: Array<{ org: string; env: string; apps: ArgoApp[] }> = [];
+    for (const { org, env } of pairs) {
+      const base = argocdBaseUrl(org, env);
+      try {
+        const token = await argocdLogin(base);
+        const apps = await argocdListApps(base, token);
+        synced.push({ org, env, apps });
+        console.log(`[INFO] resync: ${org}/${env}: ${apps.length} apps from ${base}`);
+      } catch (err) {
+        console.warn(
+          `[WARN] resync: skipping ${org}/${env} (${base}): ${(err as Error).message}`,
+        );
+      }
+    }
 
     db.exec("BEGIN");
     try {
       // Cascade DELETE wipes environments + argocd_apps via FK ON DELETE CASCADE.
       db.exec("DELETE FROM organizations");
 
-      db.prepare("INSERT INTO organizations (id, slug) VALUES (?, ?)")
-        .run(orgId, CYCLOID_ORG_SLUG);
-
-      db.prepare(
+      const orgIds = new Map<string, string>();
+      const insertOrg = db.prepare("INSERT INTO organizations (id, slug) VALUES (?, ?)");
+      const insertEnv = db.prepare(
         "INSERT INTO environments (id, slug, organization_id) VALUES (?, ?, ?)",
-      ).run(envId, CYCLOID_ENV_SLUG, orgId);
-
+      );
       const insertApp = db.prepare(`
         INSERT INTO argocd_apps
           (id, name, sync_status, health_status, namespace, last_synced, url, environment_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
-      for (const app of apps) {
-        const name = app.metadata?.name ?? "";
-        if (!name) continue;
-        insertApp.run(
-          `${envId}-${name}`,
-          name,
-          app.status?.sync?.status ?? "",
-          app.status?.health?.status ?? "",
-          app.spec?.destination?.namespace ?? "",
-          app.status?.operationState?.finishedAt ?? "",
-          `${baseUrl}/applications/${encodeURIComponent(name)}`,
-          envId,
-        );
+      let totalApps = 0;
+      for (const { org, env, apps } of synced) {
+        let orgId = orgIds.get(org);
+        if (!orgId) {
+          orgId = `org-${org}`;
+          insertOrg.run(orgId, org);
+          orgIds.set(org, orgId);
+        }
+        const envId = `env-${org}-${env}`;
+        insertEnv.run(envId, env, orgId);
+
+        const baseUrl = argocdBaseUrl(org, env);
+        for (const app of apps) {
+          const name = app.metadata?.name ?? "";
+          if (!name) continue;
+          insertApp.run(
+            `${envId}-${name}`,
+            name,
+            app.status?.sync?.status ?? "",
+            app.status?.health?.status ?? "",
+            app.spec?.destination?.namespace ?? "",
+            app.status?.operationState?.finishedAt ?? "",
+            `${baseUrl}/applications/${encodeURIComponent(name)}`,
+            envId,
+          );
+          totalApps++;
+        }
       }
       db.exec("COMMIT");
-      console.log(`[INFO] resync: completed (${apps.length} rows)`);
+      console.log(
+        `[INFO] resync: completed (${synced.length} envs synced, ${totalApps} apps inserted)`,
+      );
       return { started: true };
     } catch (err) {
       db.exec("ROLLBACK");
@@ -178,8 +304,6 @@ const server = createServer((req, res) => {
   if (method === "DELETE" && pathname === "/_cy/plugin") return send(res, 200, { ok: true });
 
   if (method === "POST" && pathname === "/_cy/resync") {
-    // Run async; respond immediately with start status. The Plugin Manager
-    // doesn't wait for completion.
     resync().then(
       (r) => console.log(`[INFO] /_cy/resync handler: ${JSON.stringify(r)}`),
       (e) => console.error(`[ERROR] /_cy/resync handler: ${e}`),
@@ -192,8 +316,6 @@ const server = createServer((req, res) => {
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`[INFO] listening on http://0.0.0.0:${port}`);
-  // Kick off an initial sync once the server is up. Fire-and-forget; failures
-  // are logged but don't crash the container.
   resync().then(
     (r) => console.log(`[INFO] initial sync: ${JSON.stringify(r)}`),
     (e) => console.error(`[ERROR] initial sync: ${e}`),
