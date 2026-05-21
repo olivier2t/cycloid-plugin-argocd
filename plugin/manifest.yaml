@@ -20,13 +20,13 @@ configuration:
     type: string
     required: true
 
-  # cycloid_org_slug is required by the runtime but the Plugin Manager
-  # fills it with ($ .org $) automatically. Operators should leave the
-  # default untouched and just save the form.
+  # cycloid_org_slug must be typed manually at install time. The Cycloid
+  # ($ .org $) template variable is NOT substituted in manifest `default:`
+  # values (only in widgets.yaml `query:` strings), so we don't pre-fill
+  # it — operators must enter their organization canonical explicitly.
   - name: "Cycloid Organization Canonical"
-    description: "Auto-filled by Cycloid with the current organization (template variable). Leave the default unchanged."
+    description: "Type your Cycloid organization canonical here (e.g. cycloid). This is the org the plugin install belongs to; the plugin uses it to build the ArgoCD URL."
     key: cycloid_org_slug
     widget: simple_text
     type: string
-    default: "($ .org $)"
     required: true
