@@ -77,6 +77,18 @@ db.exec("PRAGMA foreign_keys = ON");
 
 const schema = readFileSync(new URL("./schema.sql", import.meta.url), "utf8");
 db.exec(schema);
+for (const sql of [
+  "ALTER TABLE argocd_apps ADD COLUMN project TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE argocd_apps ADD COLUMN revision TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE argocd_apps ADD COLUMN cluster TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE argocd_apps ADD COLUMN resources TEXT NOT NULL DEFAULT ''",
+]) {
+  try {
+    db.exec(sql);
+  } catch {
+    /* column already exists */
+  }
+}
 console.log(`[INFO] sqlite ready (file=${DB_FILE})`);
 
 // ─── HTTP helper ──────────────────────────────────────────────────────────────
@@ -132,13 +144,20 @@ function jsonRequest(
 }
 
 // ─── ArgoCD client ────────────────────────────────────────────────────────────
+const ARGOCD_LOGO_URL =
+  "https://raw.githubusercontent.com/cncf/artwork/main/projects/argo/icon/color/argo-icon-color.svg";
+
 type ArgoApp = {
   metadata?: { name?: string };
-  spec?: { destination?: { namespace?: string } };
+  spec?: {
+    project?: string;
+    destination?: { namespace?: string; name?: string; server?: string };
+  };
   status?: {
-    sync?: { status?: string };
+    sync?: { status?: string; revision?: string };
     health?: { status?: string };
     reconciledAt?: string;
+    resources?: unknown[];
     history?: Array<{ deployedAt?: string }>;
     operationState?: {
       phase?: string;
@@ -148,10 +167,13 @@ type ArgoApp = {
   };
 };
 
-// ArgoCD UI deep links need /applications/<project>/<app>. The console UI
-// link is the app-of-apps entry for this Cycloid stack.
+function argocdAppUrl(conn: ArgoConn, project: string, name: string): string {
+  const proj = project || "default";
+  return `https://${conn.tlsHost}/applications/${encodeURIComponent(proj)}/${encodeURIComponent(name)}`;
+}
+
 function argocdConsoleUrl(conn: ArgoConn): string {
-  return `https://${conn.tlsHost}/applications/argocd/app-of-apps`;
+  return argocdAppUrl(conn, "argocd", "app-of-apps");
 }
 
 function formatTimestamp(iso: string): string {
@@ -163,15 +185,32 @@ function formatTimestamp(iso: string): string {
   });
 }
 
-function extractSyncStatus(app: ArgoApp): string {
-  const code = app.status?.sync?.status?.trim() ?? "";
-  const phase = app.status?.operationState?.phase?.trim() ?? "";
-  if (code && code !== "Unknown") return code;
-  if (phase === "Succeeded") return "Synced";
-  if (phase === "Running") return "Syncing";
-  if (phase === "Failed" || phase === "Error") return phase;
-  if (phase) return phase;
-  return code || "—";
+function shortRevision(rev: string): string {
+  const r = rev.trim();
+  if (r.length <= 12) return r;
+  return r.slice(0, 7);
+}
+
+function extractRevision(app: ArgoApp): string {
+  const rev = app.status?.sync?.revision?.trim() ?? "";
+  return rev ? shortRevision(rev) : "—";
+}
+
+function extractCluster(app: ArgoApp): string {
+  const dest = app.spec?.destination;
+  if (dest?.name?.trim()) return dest.name.trim();
+  const server = dest?.server?.trim() ?? "";
+  if (!server) return "—";
+  try {
+    return new URL(server).hostname || server;
+  } catch {
+    return server.replace(/^https?:\/\//, "").split("/")[0] ?? server;
+  }
+}
+
+function extractResourceCount(app: ArgoApp): string {
+  const n = app.status?.resources?.length;
+  return n !== undefined && n > 0 ? String(n) : "—";
 }
 
 function extractLastSynced(app: ArgoApp): string {
@@ -224,6 +263,27 @@ async function argocdListApps(conn: ArgoConn, token: string): Promise<ArgoApp[]>
   return parsed.items ?? [];
 }
 
+async function argocdRefreshApp(
+  conn: ArgoConn,
+  token: string,
+  name: string,
+): Promise<void> {
+  const url = new URL(
+    `/api/v1/applications/${encodeURIComponent(name)}/refresh`,
+    conn.connectUrl,
+  );
+  url.searchParams.set("refresh", "hard");
+  const res = await jsonRequest(url, {
+    method: "GET",
+    headers: { authorization: `Bearer ${token}` },
+    rejectUnauthorized: !SYNC_INSECURE_TLS,
+    tlsHost: conn.tlsHost,
+  });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`refresh ${name} HTTP ${res.status}: ${res.body.slice(0, 120)}`);
+  }
+}
+
 // ─── Name parser ──────────────────────────────────────────────────────────────
 // ArgoCD apps in Cycloid follow the naming convention
 //   "<org>-<env>-<component>"
@@ -253,23 +313,35 @@ type AppRow = {
   name: string;
   env: string;
   component: string;
-  sync_status: string;
   health_status: string;
   namespace: string;
   last_synced: string;
   url: string;
+  project: string;
+  revision: string;
+  cluster: string;
+  resources: string;
 };
 
 function listAppsFromDb(): AppRow[] {
   return db
     .prepare(
-      `SELECT a.name, e.slug AS env, a.component, a.sync_status, a.health_status,
-              a.namespace, a.last_synced, a.url
+      `SELECT a.name, e.slug AS env, a.component, a.health_status, a.namespace,
+              a.last_synced, a.url, a.project, a.revision, a.cluster, a.resources
        FROM argocd_apps AS a
        JOIN environments AS e ON e.id = a.environment_id
        ORDER BY e.slug, a.component, a.name`,
     )
     .all() as AppRow[];
+}
+
+function healthBadgeClass(status: string): string {
+  const s = status.toLowerCase();
+  if (s === "healthy") return "badge badge-healthy";
+  if (s === "progressing") return "badge badge-progressing";
+  if (s === "degraded" || s === "suspended") return "badge badge-degraded";
+  if (s === "missing" || s === "unknown") return "badge badge-unknown";
+  return "badge";
 }
 
 function escapeHtml(s: string): string {
@@ -280,33 +352,38 @@ function escapeHtml(s: string): string {
     .replaceAll('"', "&quot;");
 }
 
-function renderAppsPage(rows: AppRow[]): string {
-  const body =
+function renderAppsPage(rows: AppRow[], consoleUrl: string): string {
+  const table =
     rows.length === 0
-      ? "<p class=\"empty\">No applications synced yet. Use <strong>Resync</strong> in Cycloid plugin settings.</p>"
-      : `<table>
+      ? `<p class="empty">No Cycloid applications in ArgoCD yet. Click <strong>Refresh</strong> to pull the latest state.</p>`
+      : `<div class="table-wrap"><table>
   <thead><tr>
-    <th>Application</th><th>Environment</th><th>Component</th>
-    <th>Sync</th><th>Health</th><th>Namespace</th><th>Last synced</th><th>Link</th>
+    <th>Application</th><th>Environment</th><th>Component</th><th>Project</th>
+    <th>Revision</th><th>Cluster</th><th>Health</th><th>Resources</th>
+    <th>Namespace</th><th>Last reconciled</th><th></th>
   </tr></thead>
   <tbody>${rows
     .map((r) => {
+      const health = r.health_status?.trim() || "—";
       const link = r.url
-        ? `<a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">ArgoCD</a>`
+        ? `<a class="argo-ext" href="${escapeHtml(r.url)}" title="Open in ArgoCD">Open in ArgoCD</a>`
         : "";
       return `<tr>
-    <td>${escapeHtml(r.name)}</td>
+    <td class="mono">${escapeHtml(r.name)}</td>
     <td>${escapeHtml(r.env)}</td>
     <td>${escapeHtml(r.component)}</td>
-    <td>${escapeHtml(r.sync_status)}</td>
-    <td>${escapeHtml(r.health_status)}</td>
-    <td>${escapeHtml(r.namespace)}</td>
-    <td>${escapeHtml(r.last_synced)}</td>
+    <td>${escapeHtml(r.project || "—")}</td>
+    <td class="mono">${escapeHtml(r.revision || "—")}</td>
+    <td>${escapeHtml(r.cluster || "—")}</td>
+    <td><span class="${healthBadgeClass(health)}">${escapeHtml(health)}</span></td>
+    <td class="num">${escapeHtml(r.resources || "—")}</td>
+    <td class="mono">${escapeHtml(r.namespace)}</td>
+    <td class="muted">${escapeHtml(r.last_synced || "—")}</td>
     <td>${link}</td>
   </tr>`;
     })
     .join("")}</tbody>
-</table>`;
+</table></div>`;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -315,25 +392,189 @@ function renderAppsPage(rows: AppRow[]): string {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ArgoCD</title>
   <style>
-    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-    body { margin: 0; padding: 1rem 1.25rem; }
-    h1 { font-size: 1.25rem; margin: 0 0 1rem; font-weight: 600; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
-    th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #ccc; }
-    th { font-weight: 600; }
-    .empty { color: #666; }
-    a { color: #0b5fff; }
+    :root {
+      color-scheme: light;
+      --argo-orange: #ef7b4d;
+      --argo-orange-dark: #d9643a;
+      --argo-navy: #192149;
+      --argo-slate: #39415b;
+      --argo-bg: #f4f6fa;
+      --argo-card: #ffffff;
+      --argo-border: #dde3ef;
+      --argo-text: #1a2233;
+      --argo-muted: #5c677f;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(160deg, var(--argo-bg) 0%, #e8ecf5 100%);
+      color: var(--argo-text);
+      min-height: 100vh;
+    }
+    .page { max-width: 1280px; margin: 0 auto; padding: 1.25rem 1.5rem 2rem; }
+    .header {
+      display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+      background: var(--argo-card);
+      border: 1px solid var(--argo-border);
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+      box-shadow: 0 2px 8px rgba(25, 33, 73, 0.06);
+      margin-bottom: 1rem;
+    }
+    .header img { width: 48px; height: 48px; }
+    .header-text { flex: 1; min-width: 200px; }
+    .header h1 {
+      margin: 0;
+      font-size: 1.35rem;
+      font-weight: 700;
+      color: var(--argo-navy);
+    }
+    .header p { margin: 0.2rem 0 0; font-size: 0.85rem; color: var(--argo-muted); }
+    .header-actions { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+    .btn {
+      border: none; border-radius: 8px; padding: 0.5rem 1rem;
+      font-size: 0.875rem; font-weight: 600; cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.6; cursor: wait; }
+    .btn-primary {
+      background: var(--argo-orange);
+      color: #fff;
+    }
+    .btn-primary:hover:not(:disabled) { background: var(--argo-orange-dark); }
+    .btn-secondary {
+      background: var(--argo-card);
+      color: var(--argo-navy);
+      border: 1px solid var(--argo-border);
+    }
+    .btn-secondary:hover:not(:disabled) { background: var(--argo-bg); }
+    .card {
+      background: var(--argo-card);
+      border: 1px solid var(--argo-border);
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(25, 33, 73, 0.05);
+      overflow: hidden;
+    }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+    th {
+      text-align: left; padding: 0.65rem 0.85rem;
+      background: var(--argo-navy); color: #fff;
+      font-weight: 600; white-space: nowrap;
+    }
+    td { padding: 0.6rem 0.85rem; border-bottom: 1px solid var(--argo-border); vertical-align: middle; }
+    tr:hover td { background: #f8f9fd; }
+    .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.8rem; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .muted { color: var(--argo-muted); white-space: nowrap; }
+    .empty { padding: 2rem; text-align: center; color: var(--argo-muted); }
+    a.argo-ext {
+      color: var(--argo-orange-dark);
+      font-weight: 600;
+      text-decoration: none;
+    }
+    a.argo-ext:hover { text-decoration: underline; }
+    .badge {
+      display: inline-block; padding: 0.15rem 0.5rem;
+      border-radius: 999px; font-size: 0.75rem; font-weight: 600;
+    }
+    .badge-healthy { background: #d4edda; color: #155724; }
+    .badge-progressing { background: #fff3cd; color: #856404; }
+    .badge-degraded { background: #f8d7da; color: #721c24; }
+    .badge-unknown { background: #e9ecef; color: #495057; }
+    .status { font-size: 0.8rem; color: var(--argo-muted); min-height: 1.2em; }
+    .status.err { color: #b02a37; }
   </style>
 </head>
 <body>
-  <h1>ArgoCD applications</h1>
-  ${body}
+  <div class="page">
+    <header class="header">
+      <img src="${ARGOCD_LOGO_URL}" alt="Argo CD" width="48" height="48" />
+      <div class="header-text">
+        <h1>Argo CD applications</h1>
+        <p>GitOps apps for this Cycloid organization · <a class="argo-ext" href="${escapeHtml(consoleUrl)}">App of apps</a></p>
+      </div>
+      <div class="header-actions">
+        <button type="button" class="btn btn-primary" id="btn-refresh">Refresh</button>
+      </div>
+    </header>
+    <p class="status" id="status" aria-live="polite"></p>
+    <section class="card">${table}</section>
+  </div>
+  <script>
+    function openArgoExternal(url) {
+      try {
+        const topWin = window.top ?? window;
+        const w = topWin.open(url, "_blank", "noopener,noreferrer");
+        if (!w) topWin.location.assign(url);
+      } catch {
+        window.location.assign(url);
+      }
+    }
+    document.querySelectorAll("a.argo-ext").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.preventDefault();
+        openArgoExternal(el.href);
+      });
+    });
+    const btn = document.getElementById("btn-refresh");
+    const statusEl = document.getElementById("status");
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      statusEl.className = "status";
+      statusEl.textContent = "Refreshing manifests in Argo CD and updating the table…";
+      try {
+        const res = await fetch(new URL("api/refresh", window.location.href), {
+          method: "POST",
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "Refresh failed (" + res.status + ")");
+        statusEl.textContent = "Done — reloaded.";
+        location.reload();
+      } catch (err) {
+        statusEl.className = "status err";
+        statusEl.textContent = err.message || String(err);
+        btn.disabled = false;
+      }
+    });
+  </script>
 </body>
 </html>`;
 }
 
-// ─── Resync ───────────────────────────────────────────────────────────────────
+// ─── Refresh + resync ─────────────────────────────────────────────────────────
 let resyncRunning = false;
+
+async function refreshAllApps(): Promise<{ refreshed: number; failed: number }> {
+  if (!ARGOCD_USERNAME || !ARGOCD_PASSWORD || !CYCLOID_ORG_SLUG) {
+    throw new Error("missing configuration");
+  }
+  const org = CYCLOID_ORG_SLUG;
+  const conn = argocdConnection(org);
+  const token = await argocdLogin(conn);
+  const apps = await argocdListApps(conn, token);
+  let refreshed = 0;
+  let failed = 0;
+  for (const app of apps) {
+    const name = app.metadata?.name ?? "";
+    if (!name) continue;
+    try {
+      await argocdRefreshApp(conn, token, name);
+      refreshed++;
+      console.log(`[INFO] refresh: hard refresh queued for '${name}'`);
+    } catch (err) {
+      failed++;
+      console.warn(`[WARN] refresh ${name}: ${(err as Error).message}`);
+    }
+  }
+  // Give the Argo CD controller a moment to reconcile after refresh.
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  return { refreshed, failed };
+}
+
+// ─── Resync ───────────────────────────────────────────────────────────────────
 
 async function resync(): Promise<{ started: boolean; reason?: string; apps?: number; skipped?: number }> {
   if (resyncRunning) return { started: false, reason: "already running" };
@@ -401,8 +642,9 @@ async function resync(): Promise<{ started: boolean; reason?: string; apps?: num
       const deleteAppsForEnv = db.prepare("DELETE FROM argocd_apps WHERE environment_id = ?");
       const insertApp = db.prepare(`
         INSERT INTO argocd_apps
-          (id, name, component, sync_status, health_status, namespace, last_synced, url, environment_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, name, component, sync_status, health_status, namespace, last_synced, url,
+           project, revision, cluster, resources, environment_id)
+        VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       let inserted = 0;
@@ -410,18 +652,21 @@ async function resync(): Promise<{ started: boolean; reason?: string; apps?: num
         const envId = `env-${org}-${env}`;
         insertEnv.run(envId, env, orgId);
         deleteAppsForEnv.run(envId);
-        const consoleUrl = argocdConsoleUrl(conn);
         for (const { app, component } of list) {
           const name = app.metadata?.name ?? "";
+          const project = app.spec?.project?.trim() || "default";
           insertApp.run(
             `${envId}-${name}`,
             name,
             component,
-            extractSyncStatus(app),
             app.status?.health?.status ?? "",
             app.spec?.destination?.namespace ?? "",
             extractLastSynced(app),
-            consoleUrl,
+            argocdAppUrl(conn, project, name),
+            project,
+            extractRevision(app),
+            extractCluster(app),
+            extractResourceCount(app),
             envId,
           );
           inserted++;
@@ -482,7 +727,37 @@ const server = createServer((req, res) => {
   }
 
   if (method === "GET" && (pathname === "/" || pathname === "/index.html")) {
-    return send(res, 200, renderAppsPage(listAppsFromDb()), "text/html; charset=utf-8");
+    const consoleUrl = CYCLOID_ORG_SLUG
+      ? argocdConsoleUrl(argocdConnection(CYCLOID_ORG_SLUG))
+      : "#";
+    return send(res, 200, renderAppsPage(listAppsFromDb(), consoleUrl), "text/html; charset=utf-8");
+  }
+
+  if (method === "POST" && (pathname === "/api/refresh" || pathname === "api/refresh")) {
+    (async () => {
+      try {
+        const refresh = await refreshAllApps();
+        const sync = await resync();
+        if (!sync.started) {
+          send(res, 500, {
+            ok: false,
+            error: sync.reason ?? "resync failed",
+            refreshed: refresh.refreshed,
+          });
+          return;
+        }
+        send(res, 200, {
+          ok: true,
+          refreshed: refresh.refreshed,
+          refresh_failed: refresh.failed,
+          apps: sync.apps,
+          skipped: sync.skipped,
+        });
+      } catch (err) {
+        send(res, 500, { ok: false, error: (err as Error).message });
+      }
+    })();
+    return;
   }
 
   send(res, 404, "Not Found", "text/plain; charset=utf-8");

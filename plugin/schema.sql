@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS argocd_apps (
     namespace      TEXT,
     last_synced    TEXT,
     url            TEXT,
+    project        TEXT,
+    revision       TEXT,
+    cluster        TEXT,
+    resources      TEXT,
 
     environment_id TEXT NOT NULL,
 
