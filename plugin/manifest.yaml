@@ -25,8 +25,28 @@ configuration:
   # values (only in widgets.yaml `query:` strings), so we don't pre-fill
   # it — operators must enter their organization canonical explicitly.
   - name: "Cycloid Organization Canonical"
-    description: "Type your Cycloid organization canonical here (e.g. cycloid). This is the org the plugin install belongs to; the plugin uses it to build the ArgoCD URL."
+    description: "Type your Cycloid organization canonical here (e.g. cycloid). Used to parse env / component out of ArgoCD app names following the convention '<org>-<env>-<component>'."
     key: cycloid_org_slug
     widget: simple_text
     type: string
     required: true
+
+  # Optional override for the ArgoCD URL. Useful when the plugin sandbox
+  # cannot resolve public hostnames (UDP/53 egress is firewalled) — type the
+  # raw IP here and also set argocd_insecure_tls=true so the IP-vs-cert
+  # hostname mismatch doesn't fail the TLS handshake.
+  - name: "ArgoCD URL (optional override)"
+    description: "Leave blank to use https://argocd.<org>.demo.cycloid.io. Set when the plugin container's DNS can't see the public hostname (e.g. https://34.253.192.110 to skip DNS) — then also set 'Skip ArgoCD TLS verification' below to true."
+    key: argocd_url_override
+    widget: simple_text
+    type: string
+    required: false
+
+  # Toggle for ARGOCD_INSECURE_TLS. Use only when pointing at an IP via the
+  # URL override above, or when ArgoCD has a self-signed cert.
+  - name: "Skip ArgoCD TLS verification"
+    description: "Type 'true' to disable TLS certificate verification when calling ArgoCD. Required when the URL override points at an IP address (cert hostname won't match). Leave blank otherwise."
+    key: argocd_insecure_tls
+    widget: simple_text
+    type: string
+    required: false

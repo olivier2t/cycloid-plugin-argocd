@@ -119,12 +119,57 @@ the credentials to `<derived_url>/api/v1/session`, receives a JWT, and uses
 it as a Bearer token for `/api/v1/applications`. The JWT is never persisted;
 we log in again on each sync.
 
+Optional install-form fields (used together to bypass DNS in restricted sandboxes):
+
+| `key`                  | Env var                | Operator action | Description                                                                                |
+|------------------------|------------------------|-----------------|--------------------------------------------------------------------------------------------|
+| `argocd_url_override`  | `ARGOCD_URL_OVERRIDE`  | leave blank, or type an IP URL | Full URL (incl. scheme). When set, replaces the computed `https://argocd.<org>.demo.cycloid.io`. Use this if the plugin sandbox can't resolve the default hostname. |
+| `argocd_insecure_tls`  | `ARGOCD_INSECURE_TLS`  | leave blank, or type `true`    | Skips TLS certificate verification. Required when `argocd_url_override` points at an IP (cert hostname won't match). |
+
 Optional, set directly in the container (not in the install form):
 
-| Env var               | Default      | Description                                                                                  |
-|-----------------------|--------------|----------------------------------------------------------------------------------------------|
-| `DB_FILE`             | `:memory:`   | Path to the SQLite file. Use a mounted volume if you want data to survive container restarts.|
-| `ARGOCD_INSECURE_TLS` | _unset_      | Set to `true` to skip TLS verification when calling a self-signed ArgoCD. Off by default.    |
+| Env var      | Default      | Description                                                                                  |
+|--------------|--------------|----------------------------------------------------------------------------------------------|
+| `DB_FILE`    | `:memory:`   | Path to the SQLite file. Use a mounted volume if you want data to survive container restarts.|
+
+### Troubleshooting: `getaddrinfo EAI_AGAIN` on the ArgoCD hostname
+
+If the plugin log shows:
+
+```
+[ERROR] resync <org>: getaddrinfo EAI_AGAIN argocd.<org>.demo.cycloid.io
+```
+
+…but `getent hosts argocd.<org>.demo.cycloid.io` succeeds *on the host*, the
+plugin sandbox can't reach DNS. The most common cause we've seen is that
+**UDP/53 egress is firewalled out of the plugin sandbox**, even when TCP/443
+to public IPs is allowed. Both glibc's `getaddrinfo` and Node's c-ares
+resolver depend on UDP/53 by default; both time out.
+
+Confirm from the host (inside the plugin-manager container):
+
+```sh
+CTR=$(crictl ps --name '.*<install-uuid-prefix>.*' -q | head -1)
+
+# Same hostname through both resolvers; if both fail, UDP/53 is blocked
+crictl exec "$CTR" node -e '
+const dns = require("node:dns");
+dns.lookup("argocd.<org>.demo.cycloid.io", (e, a) =>
+  console.log("getaddrinfo:", e ? "ERR "+e.code : "OK "+a));
+const r = new dns.Resolver(); r.setServers(["8.8.8.8"]);
+r.resolve4("argocd.<org>.demo.cycloid.io", (e, a) =>
+  console.log("c-ares:", e ? "ERR "+e.code : "OK "+JSON.stringify(a)));
+'
+```
+
+Two ways out:
+
+1. **Fix the platform** — open UDP/53 egress from the plugin sandbox, or run
+   a local DNS forwarder reachable from inside it.
+2. **Bypass DNS in the plugin** — at install time, set:
+   - `argocd_url_override` = `https://<ArgoCD-IP>` (resolve once from the
+     host: `getent hosts argocd.<org>.demo.cycloid.io`)
+   - `argocd_insecure_tls` = `true` (the cert won't match an IP host).
 
 ## One-time per-component enable (Cycloid gotcha)
 
