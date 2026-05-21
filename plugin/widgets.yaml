@@ -4,34 +4,16 @@
     config:
       tab_name: ArgoCD
   widget:
-    # Filter by org + env + component for the current Cycloid component page.
-    # The relations block below tells the Plugin Manager how to bind
-    # ($ .org $), ($ .env $) and ($ .component $) in the WHERE clause.
+    # 1.6.9 DIAGNOSTIC: no WHERE, no JOINs, no relations.
+    # Proves whether the Plugin Manager can read this install's SQLite at all.
+    # If /query still returns Data:null, the PM is not reading the plugin DB
+    # (platform issue). If Data has rows, restore filtered query in 1.6.10.
     query: >
-      SELECT a.name, e.slug AS env, a.component, a.sync_status, a.health_status,
-             a.namespace, a.last_synced, a.url
-      FROM argocd_apps AS a
-      JOIN environments  AS e ON e.id = a.environment_id
-      JOIN organizations AS o ON o.id = e.organization_id
-      WHERE o.slug = '($ .org $)'
-        AND e.slug = '($ .env $)'
-        AND a.component = '($ .component $)'
-    relations:
-      - name: "Organization Slug"
-        description: "The current Cycloid organization."
-        selector: "o.slug"
-      - name: "Environment Slug"
-        description: "The current Cycloid environment."
-        selector: "e.slug"
-      - name: "Component"
-        description: "The current Cycloid component."
-        selector: "a.component"
+      SELECT name, component, sync_status, health_status, namespace, last_synced, url
+      FROM argocd_apps
     columns:
       - value: name
         title: Application
-        type: string
-      - value: env
-        title: Environment
         type: string
       - value: component
         title: Component
