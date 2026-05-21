@@ -238,7 +238,13 @@ async function resync(): Promise<{ started: boolean; reason?: string; apps?: num
         parseAppName(name, org) ??
         parseAppName(app.spec?.destination?.namespace ?? "", org);
       if (!parsed) {
-        console.warn(`[WARN] skipping app '${name}': does not match '<org>-<env>-<component>'`);
+        // Apps that don't match the convention are typically umbrella/
+        // bootstrap apps (e.g. an "app-of-apps" parent). They aren't tied
+        // to a single Cycloid component, so they have no component tab to
+        // render on — silently skip and count them.
+        console.log(
+          `[INFO] no component mapping for app '${name}': not '${org}-<env>-<component>', skipping`,
+        );
         skipped++;
         continue;
       }

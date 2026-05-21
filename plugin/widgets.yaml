@@ -4,21 +4,34 @@
     config:
       tab_name: ArgoCD
   widget:
-    # 1.6.2 DIAGNOSTIC: no WHERE clause. If even this unfiltered query
-    # returns no rows, the Plugin Manager isn't executing SQL against the
-    # plugin's SQLite at all (cache, separate DB, or HTTP-based query
-    # contract we haven't implemented). If it DOES return rows, then the
-    # whole pipeline works and we just need to add the right WHERE clause
-    # back (with whichever substitution mechanism actually works in this
-    # Cycloid version).
+    # Filter by org + env + component for the current Cycloid component page.
+    # The relations block below tells the Plugin Manager how to bind
+    # ($ .org $), ($ .env $) and ($ .component $) in the WHERE clause.
     query: >
-      SELECT a.name, a.component, a.sync_status, a.health_status, a.namespace, a.last_synced, a.url
+      SELECT a.name, e.slug AS env, a.component, a.sync_status, a.health_status,
+             a.namespace, a.last_synced, a.url
       FROM argocd_apps AS a
       JOIN environments  AS e ON e.id = a.environment_id
       JOIN organizations AS o ON o.id = e.organization_id
+      WHERE o.slug = '($ .org $)'
+        AND e.slug = '($ .env $)'
+        AND a.component = '($ .component $)'
+    relations:
+      - name: "Organization Slug"
+        description: "The current Cycloid organization."
+        selector: "o.slug"
+      - name: "Environment Slug"
+        description: "The current Cycloid environment."
+        selector: "e.slug"
+      - name: "Component"
+        description: "The current Cycloid component."
+        selector: "a.component"
     columns:
       - value: name
         title: Application
+        type: string
+      - value: env
+        title: Environment
         type: string
       - value: component
         title: Component
