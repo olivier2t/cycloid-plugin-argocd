@@ -4,27 +4,18 @@
     config:
       tab_name: ArgoCD
   widget:
-    # The Plugin Manager substitutes ($ .org $) and ($ .env $) with the
-    # current widget context before running this SQL against the plugin's
-    # SQLite. ($ .component $) is NOT used here because it is not a
-    # confirmed-supported template variable in widget queries — the table
-    # shows every ArgoCD app in the current Cycloid (org, env), and the
-    # `Component` column lets operators see which app belongs to which
-    # component.
+    # 1.6.2 DIAGNOSTIC: no WHERE clause. If even this unfiltered query
+    # returns no rows, the Plugin Manager isn't executing SQL against the
+    # plugin's SQLite at all (cache, separate DB, or HTTP-based query
+    # contract we haven't implemented). If it DOES return rows, then the
+    # whole pipeline works and we just need to add the right WHERE clause
+    # back (with whichever substitution mechanism actually works in this
+    # Cycloid version).
     query: >
       SELECT a.name, a.component, a.sync_status, a.health_status, a.namespace, a.last_synced, a.url
       FROM argocd_apps AS a
       JOIN environments  AS e ON e.id = a.environment_id
       JOIN organizations AS o ON o.id = e.organization_id
-      WHERE o.slug = '($ .org $)'
-        AND e.slug = '($ .env $)'
-    relations:
-      - name: "Organization Slug"
-        description: "The current Cycloid organization."
-        selector: "o.slug"
-      - name: "Environment Slug"
-        description: "The current Cycloid environment."
-        selector: "e.slug"
     columns:
       - value: name
         title: Application
