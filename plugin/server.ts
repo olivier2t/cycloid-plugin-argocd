@@ -138,9 +138,62 @@ type ArgoApp = {
   status?: {
     sync?: { status?: string };
     health?: { status?: string };
-    operationState?: { finishedAt?: string };
+    reconciledAt?: string;
+    history?: Array<{ deployedAt?: string }>;
+    operationState?: {
+      phase?: string;
+      finishedAt?: string;
+      startedAt?: string;
+    };
   };
 };
+
+// ArgoCD UI deep links need /applications/<project>/<app>. The console UI
+// link is the app-of-apps entry for this Cycloid stack.
+function argocdConsoleUrl(conn: ArgoConn): string {
+  return `https://${conn.tlsHost}/applications/argocd/app-of-apps`;
+}
+
+function formatTimestamp(iso: string): string {
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return iso;
+  return new Date(ms).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+function extractSyncStatus(app: ArgoApp): string {
+  const code = app.status?.sync?.status?.trim() ?? "";
+  const phase = app.status?.operationState?.phase?.trim() ?? "";
+  if (code && code !== "Unknown") return code;
+  if (phase === "Succeeded") return "Synced";
+  if (phase === "Running") return "Syncing";
+  if (phase === "Failed" || phase === "Error") return phase;
+  if (phase) return phase;
+  return code || "—";
+}
+
+function extractLastSynced(app: ArgoApp): string {
+  const candidates: string[] = [];
+  const op = app.status?.operationState;
+  if (op?.finishedAt) candidates.push(op.finishedAt);
+  if (app.status?.reconciledAt) candidates.push(app.status.reconciledAt);
+  if (op?.startedAt && !op.finishedAt) candidates.push(op.startedAt);
+  for (const h of app.status?.history ?? []) {
+    if (h.deployedAt) candidates.push(h.deployedAt);
+  }
+  let best = "";
+  let bestMs = 0;
+  for (const iso of candidates) {
+    const ms = Date.parse(iso);
+    if (!Number.isNaN(ms) && ms > bestMs) {
+      bestMs = ms;
+      best = iso;
+    }
+  }
+  return best ? formatTimestamp(best) : "";
+}
 
 async function argocdLogin(conn: ArgoConn): Promise<string> {
   const res = await jsonRequest(new URL("/api/v1/session", conn.connectUrl), {
@@ -239,7 +292,7 @@ function renderAppsPage(rows: AppRow[]): string {
   <tbody>${rows
     .map((r) => {
       const link = r.url
-        ? `<a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">Open</a>`
+        ? `<a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">ArgoCD</a>`
         : "";
       return `<tr>
     <td>${escapeHtml(r.name)}</td>
@@ -357,20 +410,18 @@ async function resync(): Promise<{ started: boolean; reason?: string; apps?: num
         const envId = `env-${org}-${env}`;
         insertEnv.run(envId, env, orgId);
         deleteAppsForEnv.run(envId);
-        // The link is for a human to click from the Cycloid UI, so it must
-        // use the canonical hostname (not the IP we connected with).
-        const humanBaseUrl = `https://${conn.tlsHost}`;
+        const consoleUrl = argocdConsoleUrl(conn);
         for (const { app, component } of list) {
           const name = app.metadata?.name ?? "";
           insertApp.run(
             `${envId}-${name}`,
             name,
             component,
-            app.status?.sync?.status ?? "",
+            extractSyncStatus(app),
             app.status?.health?.status ?? "",
             app.spec?.destination?.namespace ?? "",
-            app.status?.operationState?.finishedAt ?? "",
-            `${humanBaseUrl}/applications/${encodeURIComponent(name)}`,
+            extractLastSynced(app),
+            consoleUrl,
             envId,
           );
           inserted++;
