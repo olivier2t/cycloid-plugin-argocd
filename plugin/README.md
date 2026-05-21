@@ -117,8 +117,19 @@ we log in again on each sync.
 The org/env canonicals themselves are **not** install-time fields either.
 They are discovered at sync time from the Cycloid backend via the
 `PROXY_URL` environment variable, which the Plugin Manager injects as a
-pre-authenticated URL. You don't set it — it is part of the runtime
-contract between the plugin and the Plugin Manager.
+path (e.g. `/internal/plugins/<uuid>/proxy`). The plugin prefixes that
+path with the **Plugin Manager's reachable host**, which is a property of
+the Cycloid deployment, not of a per-install configuration. It is
+hard-coded in `server.ts`:
+
+```ts
+const PROXY_HOST = process.env.PROXY_HOST_OVERRIDE?.trim() ||
+  "http://cycloid-plugin-manager:4001";
+```
+
+If you deploy the Cycloid platform with a different Plugin Manager hostname
+or port, change this constant (and bump the plugin version). For local dev
+you can override it without rebuilding by setting `PROXY_HOST_OVERRIDE`.
 
 Optional, set directly in the container (not in the install form):
 

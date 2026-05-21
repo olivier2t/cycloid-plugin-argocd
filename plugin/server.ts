@@ -20,9 +20,13 @@ const ARGOCD_USERNAME = process.env.ARGOCD_USERNAME?.trim() ?? "";
 const ARGOCD_PASSWORD = process.env.ARGOCD_PASSWORD ?? "";
 
 // Injected by the Plugin Manager. Used to enumerate orgs/envs at sync time.
-// PROXY_URL is pre-authenticated by the Plugin Manager (the install's identity
-// is bound to the sandbox network and/or a path-embedded token), so we don't
-// need a separate PLUGIN_SECRET.
+// In Cycloid's hosted Plugin Manager this comes through as a PATH only
+// (e.g. "/internal/plugins/<uuid>/proxy"), with the host implied by the
+// deployment. The host is a property of the Cycloid deployment itself, not
+// of a per-install configuration, so we keep it as a constant here. Override
+// with PROXY_HOST_OVERRIDE for local dev.
+const PROXY_HOST = process.env.PROXY_HOST_OVERRIDE?.trim() ||
+  "http://cycloid-plugin-manager:4001";
 const PROXY_URL = process.env.PROXY_URL?.replace(/\/+$/, "") ?? "";
 
 // The Plugin Manager passes DB_FILE as a `file:` URI (e.g.
@@ -70,6 +74,7 @@ const SYNC_INSECURE_TLS = process.env.ARGOCD_INSECURE_TLS === "true";
     // diagnostic.
     const preview = PROXY_URL.length > 200 ? `${PROXY_URL.slice(0, 200)}…` : PROXY_URL;
     console.log(`[INFO] PROXY_URL value: ${preview} (length=${PROXY_URL.length})`);
+    console.log(`[INFO] PROXY_HOST: ${PROXY_HOST}`);
   }
 })();
 
@@ -136,18 +141,16 @@ function jsonRequest(
 // just GET ${PROXY_URL}${path} and the proxy attaches the install's identity
 // for us. No separate secret to pass.
 //
-// The Plugin Manager may inject PROXY_URL with or without a scheme. Handle
-// both shapes so we don't trip on `host:port/...` style values.
+// The Plugin Manager may inject PROXY_URL with or without a scheme, or — as
+// is the case in Cycloid's hosted Plugin Manager — as a bare PATH whose host
+// is implied by the deployment (see PROXY_HOST above). Normalise all three.
 function buildProxyUrl(path: string): URL {
   let raw = PROXY_URL;
   if (!/^https?:\/\//i.test(raw)) {
     if (raw.startsWith("//")) {
       raw = `http:${raw}`;
     } else if (raw.startsWith("/")) {
-      // Pure path is meaningless without a host — surface a clear error.
-      throw new Error(
-        `PROXY_URL is a path with no host ('${PROXY_URL}'). Expected http(s)://host[:port]/…`,
-      );
+      raw = `${PROXY_HOST.replace(/\/+$/, "")}${raw}`;
     } else {
       raw = `http://${raw}`;
     }
@@ -157,7 +160,7 @@ function buildProxyUrl(path: string): URL {
     return new URL(joined);
   } catch (e) {
     throw new Error(
-      `cannot parse proxy URL '${joined}' (PROXY_URL='${PROXY_URL}'): ${(e as Error).message}`,
+      `cannot parse proxy URL '${joined}' (PROXY_URL='${PROXY_URL}', PROXY_HOST='${PROXY_HOST}'): ${(e as Error).message}`,
     );
   }
 }
