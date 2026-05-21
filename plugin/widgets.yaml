@@ -1,4 +1,8 @@
-- type: table
+# iframe + sideMenuPage: the Cycloid console on this stack renders the side
+# menu entry but shows unknownWidgetTitle for table + sideMenuPage even when
+# the plugin_widgets/.../query API returns rows. The plugin serves the table
+# as HTML from GET / inside the iframe instead.
+- type: iframe
   placement:
     type: sideMenuPage
     config:
@@ -6,37 +10,4 @@
       description: ArgoCD applications synced for this organization
       icon: https://raw.githubusercontent.com/cncf/artwork/main/projects/argo/icon/color/argo-icon-color.svg
   widget:
-    # Org-wide side menu page: all apps for this install (one ArgoCD per org).
-    # No per-component / per-env filtering — avoids Plugin Manager 500s
-    # from WHERE placeholders and enable-time relations.
-    query: >
-      SELECT a.name, e.slug AS env, a.component, a.sync_status, a.health_status,
-             a.namespace, a.last_synced, a.url
-      FROM argocd_apps AS a
-      JOIN environments AS e ON e.id = a.environment_id
-      JOIN organizations AS o ON o.id = e.organization_id
-    columns:
-      - value: name
-        title: Application
-        type: string
-      - value: env
-        title: Environment
-        type: string
-      - value: component
-        title: Component
-        type: string
-      - value: sync_status
-        title: Sync
-        type: string
-      - value: health_status
-        title: Health
-        type: string
-      - value: namespace
-        title: Namespace
-        type: string
-      - value: last_synced
-        title: Last Synced
-        type: string
-      - value: url
-        title: Link
-        type: string
+    query: /

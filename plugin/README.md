@@ -11,11 +11,13 @@ Data is refreshed on plugin startup and whenever you click **Resync** in the
 Cycloid UI. There is **no** per-component or per-environment filtering in the
 widget SQL — that kept causing Plugin Manager errors on this platform.
 
-## Why `table + sideMenuPage`
+## Why `iframe + sideMenuPage`
 
-- `table + sideMenuPage` — what this plugin uses (org-wide sidebar page)
-- `table + component` — works technically, but per-component enable + SQL
-  filtering was fragile on our stack (422 / PM 500)
+- `iframe + sideMenuPage` — what this plugin uses (org-wide sidebar; HTML table
+  served from `GET /` in the container)
+- `table + sideMenuPage` — query API can return rows, but the Cycloid console on
+  this stack still shows **unknownWidgetTitle** (no table renderer)
+- `table + component` — works, but per-component enable + SQL filtering was fragile
 - `iframe + component` — not rendered by the Cycloid UI
 
 ## Files
@@ -23,7 +25,7 @@ widget SQL — that kept causing Plugin Manager errors on this platform.
 | File             | Purpose                                                              |
 |------------------|----------------------------------------------------------------------|
 | `manifest.yaml`  | Install form: credentials, org slug, optional ArgoCD URL override.   |
-| `widgets.yaml`   | One `table` widget on `placement: sideMenuPage`, title **ArgoCD**.   |
+| `widgets.yaml`   | One `iframe` widget on `placement: sideMenuPage`, title **ArgoCD**.  |
 | `schema.sql`     | SQLite tables: `organizations`, `environments`, `argocd_apps`.       |
 | `server.ts`      | Node 22 server: SQLite open + migrate, org-wide ArgoCD sync.           |
 | `Dockerfile`     | `node:22-trixie-slim`, runs `.ts` directly with type-strip + sqlite. |
@@ -38,26 +40,24 @@ No Bun, no `just`, no third-party libraries, no build step.
 │ Cycloid console — side menu    │
 │ “ArgoCD” page (org-wide)       │
 └─────────────────┬──────────────┘
-                  │ GET …/plugin_widgets/{id}/query
+                  │ iframe → GET / (plugin container)
                   ▼
-┌──────────────────────────────────┐  SELECT all rows (no WHERE)
-│ Cycloid Plugin Manager           │ ─────────────────────────────────▶ SQLite
-└──────────────────────────────────┘     argocd_apps / environments
-
-┌──────────────────────────────────┐  login + GET /api/v1/applications
-│ Plugin container (Node 22)         │ ─────────────────────────────────▶ ArgoCD
-│ on POST /_cy/resync                │     https://argocd.<org>.demo… or override
+┌──────────────────────────────────┐  reads SQLite, renders HTML table
+│ Plugin container (Node 22)         │
+│   GET /                            │
 └─────┬────────────────────────────┘
-      │ upsert into SQLite (env/component parsed from app name)
+      │ upsert on POST /_cy/resync
       ▼
+┌──────────────────────────────────┐  login + GET /api/v1/applications
+│ ArgoCD sync                        │ ─────────────────────────────────▶ ArgoCD
+└──────────────────────────────────┘     https://argocd.<org>.demo… or override
 ```
 
 1. One plugin install per Cycloid org (`cycloid_org_slug` in the install form).
 2. On startup and `POST /_cy/resync`, the plugin logs into ArgoCD, fetches all
    applications, parses `<org>-<env>-<component>` from each app name, and stores
    rows in SQLite.
-3. The side-menu widget runs a simple `SELECT` with **no** `WHERE` and **no**
-   `relations:` on component enable — that combination caused PM 500 / UI 422.
+3. The side-menu **iframe** loads `GET /`, which reads SQLite and renders the table.
 
 ## Install form
 
@@ -149,11 +149,11 @@ curl -sS -H "Authorization: Bearer $CY_API_KEY" \
 ## Build, push, install
 
 ```sh
-docker build -t docker.io/<your-namespace>/cycloid-plugin-argocd:1.7.0 .
-docker push docker.io/<your-namespace>/cycloid-plugin-argocd:1.7.0
+docker build -t docker.io/<your-namespace>/cycloid-plugin-argocd:1.7.1 .
+docker push docker.io/<your-namespace>/cycloid-plugin-argocd:1.7.1
 ```
 
-The image tag must match `package.json` (e.g. `1.7.0`).
+The image tag must match `package.json` (e.g. `1.7.1`).
 
 ### Via the Cycloid console (recommended)
 
@@ -181,7 +181,7 @@ PLUGIN_ID=$(curl -sS -H "Authorization: Bearer $CY_API_KEY" \
 curl -sS -X POST \
   -H "Authorization: Bearer $CY_API_KEY" \
   -H "Content-Type: application/vnd.cycloid.io.v1+json" \
-  -d '{"url":"docker.io/<ns>/cycloid-plugin-argocd:1.7.0"}' \
+  -d '{"url":"docker.io/<ns>/cycloid-plugin-argocd:1.7.1"}' \
   "$CY_API_URL/organizations/$CY_ORG/plugin_registries/$REGISTRY_ID/plugins/$PLUGIN_ID/versions" \
   | jq '.data.id'
 VERSION_ID=...
@@ -238,12 +238,11 @@ in `manifest.yaml`), the existing install becomes stale and must be
 uninstalled and reinstalled. From the Cycloid console: **Plugins → ArgoCD
 → Uninstall**, then publish the new version and install fresh.
 
-### From `1.6.x` (component tab + filtering)
+### From `1.6.x` / `1.7.0` (table side menu)
 
-`1.7.0` moves the widget to `sideMenuPage` and removes SQL `WHERE` /
-`relations` filtering. Uninstall the old install, publish `1.7.0`, reinstall
-with `cycloid_org_slug` typed explicitly, then open **ArgoCD** in the org side
-menu (no per-component enable).
+`1.7.1` uses `iframe + sideMenuPage` because `table + sideMenuPage` returns data
+from the query API but the console shows **unknownWidgetTitle**. Publish `1.7.1`,
+update the install, hard-refresh the **ArgoCD** side menu page.
 
 ### From earlier versions
 

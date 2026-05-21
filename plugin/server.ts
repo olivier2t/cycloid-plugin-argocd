@@ -195,6 +195,90 @@ function parseAppName(
   return { env, component };
 }
 
+// ─── UI (iframe side menu) ────────────────────────────────────────────────────
+type AppRow = {
+  name: string;
+  env: string;
+  component: string;
+  sync_status: string;
+  health_status: string;
+  namespace: string;
+  last_synced: string;
+  url: string;
+};
+
+function listAppsFromDb(): AppRow[] {
+  return db
+    .prepare(
+      `SELECT a.name, e.slug AS env, a.component, a.sync_status, a.health_status,
+              a.namespace, a.last_synced, a.url
+       FROM argocd_apps AS a
+       JOIN environments AS e ON e.id = a.environment_id
+       ORDER BY e.slug, a.component, a.name`,
+    )
+    .all() as AppRow[];
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function renderAppsPage(rows: AppRow[]): string {
+  const body =
+    rows.length === 0
+      ? "<p class=\"empty\">No applications synced yet. Use <strong>Resync</strong> in Cycloid plugin settings.</p>"
+      : `<table>
+  <thead><tr>
+    <th>Application</th><th>Environment</th><th>Component</th>
+    <th>Sync</th><th>Health</th><th>Namespace</th><th>Last synced</th><th>Link</th>
+  </tr></thead>
+  <tbody>${rows
+    .map((r) => {
+      const link = r.url
+        ? `<a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">Open</a>`
+        : "";
+      return `<tr>
+    <td>${escapeHtml(r.name)}</td>
+    <td>${escapeHtml(r.env)}</td>
+    <td>${escapeHtml(r.component)}</td>
+    <td>${escapeHtml(r.sync_status)}</td>
+    <td>${escapeHtml(r.health_status)}</td>
+    <td>${escapeHtml(r.namespace)}</td>
+    <td>${escapeHtml(r.last_synced)}</td>
+    <td>${link}</td>
+  </tr>`;
+    })
+    .join("")}</tbody>
+</table>`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ArgoCD</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; padding: 1rem 1.25rem; }
+    h1 { font-size: 1.25rem; margin: 0 0 1rem; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #ccc; }
+    th { font-weight: 600; }
+    .empty { color: #666; }
+    a { color: #0b5fff; }
+  </style>
+</head>
+<body>
+  <h1>ArgoCD applications</h1>
+  ${body}
+</body>
+</html>`;
+}
+
 // ─── Resync ───────────────────────────────────────────────────────────────────
 let resyncRunning = false;
 
@@ -344,6 +428,10 @@ const server = createServer((req, res) => {
       (e) => console.error(`[ERROR] /_cy/resync handler: ${e}`),
     );
     return send(res, 200, { started: true });
+  }
+
+  if (method === "GET" && (pathname === "/" || pathname === "/index.html")) {
+    return send(res, 200, renderAppsPage(listAppsFromDb()), "text/html; charset=utf-8");
   }
 
   send(res, 404, "Not Found", "text/plain; charset=utf-8");

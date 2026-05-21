@@ -1,4 +1,4 @@
-description: "Import ArgoCD applications and show them in an org-wide ArgoCD side menu page."
+description: "Sync ArgoCD applications and show them on an org-wide ArgoCD side menu page (iframe UI)."
 icon: "https://raw.githubusercontent.com/cncf/artwork/main/projects/argo/icon/color/argo-icon-color.svg"
 
 # One install per Cycloid organization. The plugin syncs against a single
