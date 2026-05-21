@@ -1,7 +1,7 @@
 import { createServer, type ServerResponse } from "node:http";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
 // ─── Configuration ────────────────────────────────────────────────────────────
@@ -75,6 +75,46 @@ const SYNC_INSECURE_TLS = process.env.ARGOCD_INSECURE_TLS === "true";
     const preview = PROXY_URL.length > 200 ? `${PROXY_URL.slice(0, 200)}…` : PROXY_URL;
     console.log(`[INFO] PROXY_URL value: ${preview} (length=${PROXY_URL.length})`);
     console.log(`[INFO] PROXY_HOST: ${PROXY_HOST}`);
+  }
+})();
+
+// Filesystem diagnostic: the Plugin Manager doesn't inject any auth token
+// via env vars, so check if one is mounted on disk (Kubernetes-style).
+(() => {
+  const candidates = [
+    "/var/run/secrets",
+    "/run/secrets",
+    "/etc/secrets",
+    "/etc/cycloid",
+    "/var/db/plugin",
+    "/var/lib/plugin",
+    "/cycloid",
+  ];
+  for (const dir of candidates) {
+    try {
+      const entries = readdirSync(dir, { withFileTypes: true });
+      console.log(
+        `[INFO] fs: ${dir} → ${entries
+          .map((e) => `${e.name}${e.isDirectory() ? "/" : ""}`)
+          .join(", ") || "(empty)"}`,
+      );
+      // Recurse one level into directories.
+      for (const e of entries) {
+        if (!e.isDirectory()) continue;
+        try {
+          const sub = readdirSync(`${dir}/${e.name}`, { withFileTypes: true });
+          console.log(
+            `[INFO] fs: ${dir}/${e.name} → ${sub
+              .map((s) => `${s.name}${s.isDirectory() ? "/" : ""}`)
+              .join(", ") || "(empty)"}`,
+          );
+        } catch {
+          /* unreadable subdir, skip */
+        }
+      }
+    } catch {
+      /* dir doesn't exist or isn't readable, skip silently */
+    }
   }
 })();
 

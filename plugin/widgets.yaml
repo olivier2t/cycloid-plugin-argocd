@@ -4,11 +4,18 @@
     config:
       tab_name: ArgoCD
   widget:
+    # The Plugin Manager substitutes ($ .org $) and ($ .env $) with the
+    # current component's organization_canonical / environment_canonical
+    # before running this SQL against the plugin's SQLite.
     query: >
       SELECT a.name, a.sync_status, a.health_status, a.namespace, a.last_synced, a.url
       FROM argocd_apps AS a
       JOIN environments  AS e ON e.id = a.environment_id
       JOIN organizations AS o ON o.id = e.organization_id
+      WHERE o.slug = '($ .org $)'
+        AND e.slug = '($ .env $)'
+    # Declared for backwards-compat with the relations-based filtering path,
+    # in case the Cycloid console prefers it over the placeholder substitution.
     relations:
       - name: "Organization Slug"
         description: "The current Cycloid organization."
