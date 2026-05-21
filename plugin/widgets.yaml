@@ -4,9 +4,12 @@
     config:
       tab_name: ArgoCD
   widget:
-    # The Plugin Manager substitutes ($ .org $) and ($ .env $) with the
-    # current component's organization_canonical / environment_canonical
-    # before running this SQL against the plugin's SQLite.
+    # The Plugin Manager substitutes ($ .org $), ($ .env $) and ($ .component $)
+    # with the current widget context before running this SQL against the
+    # plugin's SQLite. The component filter narrows the result to just the
+    # ArgoCD app(s) that belong to the current Cycloid component (which
+    # follows the naming convention "<org>-<env>-<component>" — see
+    # server.ts parseAppName).
     query: >
       SELECT a.name, a.sync_status, a.health_status, a.namespace, a.last_synced, a.url
       FROM argocd_apps AS a
@@ -14,8 +17,7 @@
       JOIN organizations AS o ON o.id = e.organization_id
       WHERE o.slug = '($ .org $)'
         AND e.slug = '($ .env $)'
-    # Declared for backwards-compat with the relations-based filtering path,
-    # in case the Cycloid console prefers it over the placeholder substitution.
+        AND a.component = '($ .component $)'
     relations:
       - name: "Organization Slug"
         description: "The current Cycloid organization."
@@ -23,6 +25,9 @@
       - name: "Environment Slug"
         description: "The current Cycloid environment."
         selector: "e.slug"
+      - name: "Component"
+        description: "The current Cycloid component."
+        selector: "a.component"
     columns:
       - value: name
         title: Application

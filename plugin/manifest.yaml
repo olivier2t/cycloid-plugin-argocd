@@ -1,11 +1,10 @@
 description: "Import ArgoCD applications and show them as a tab on Cycloid components."
 icon: "https://raw.githubusercontent.com/cncf/artwork/main/projects/argo/icon/color/argo-icon-color.svg"
 
-# The install form is intentionally minimal: only ArgoCD credentials. The
-# organization is fixed at install time (the install is org-scoped) and the
-# environment is dynamic per widget render — neither belongs in the form.
-# How the plugin LEARNS those values at runtime is what this diagnostic
-# build (1.5.x) is here to find out: see [INFO] /_cy/* logs after install.
+# One install per Cycloid organization. The plugin syncs against a single
+# ArgoCD instance per org (https://argocd.<org>.demo.cycloid.io) and parses
+# each app's (env, component) from its name/namespace, which follow the
+# Cycloid convention "<org>-<env>-<component>".
 configuration:
   - name: "ArgoCD Username"
     description: "Local ArgoCD account used to log into the ArgoCD API."
@@ -19,4 +18,15 @@ configuration:
     key: argocd_password
     widget: simple_text
     type: string
+    required: true
+
+  # cycloid_org_slug is required by the runtime but the Plugin Manager
+  # fills it with ($ .org $) automatically. Operators should leave the
+  # default untouched and just save the form.
+  - name: "Cycloid Organization Canonical"
+    description: "Auto-filled by Cycloid with the current organization (template variable). Leave the default unchanged."
+    key: cycloid_org_slug
+    widget: simple_text
+    type: string
+    default: "($ .org $)"
     required: true

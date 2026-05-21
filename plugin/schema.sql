@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS environments (
 CREATE TABLE IF NOT EXISTS argocd_apps (
     id             TEXT PRIMARY KEY,
     name           TEXT,
+    component      TEXT,
     sync_status    TEXT,
     health_status  TEXT,
     namespace      TEXT,
