@@ -1,6 +1,6 @@
 {
   "name": "cycloid-plugin-argocd",
-  "version": "1.4.6",
+  "version": "1.5.1",
   "private": true,
   "type": "module"
 }

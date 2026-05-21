@@ -1,11 +1,11 @@
 description: "Import ArgoCD applications and show them as a tab on Cycloid components."
 icon: "https://raw.githubusercontent.com/cncf/artwork/main/projects/argo/icon/color/argo-icon-color.svg"
 
-# The plugin discovers organizations and environments at sync time via the
-# Cycloid Plugin Manager proxy (PROXY_URL / PLUGIN_SECRET), so the operator
-# only has to supply the ArgoCD credentials. Org/env slugs are no longer in
-# the install form; they're derived from each component's context at
-# widget-render time (via the JOIN relations declared in widgets.yaml).
+# The install form is intentionally minimal: only ArgoCD credentials. The
+# organization is fixed at install time (the install is org-scoped) and the
+# environment is dynamic per widget render — neither belongs in the form.
+# How the plugin LEARNS those values at runtime is what this diagnostic
+# build (1.5.x) is here to find out: see [INFO] /_cy/* logs after install.
 configuration:
   - name: "ArgoCD Username"
     description: "Local ArgoCD account used to log into the ArgoCD API."
