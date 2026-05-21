@@ -1,19 +1,26 @@
 - type: table
   placement:
-    type: component
+    type: sideMenuPage
     config:
-      tab_name: ArgoCD
+      title: ArgoCD
+      description: ArgoCD applications synced for this organization
+      icon: https://raw.githubusercontent.com/cncf/artwork/main/projects/argo/icon/color/argo-icon-color.svg
   widget:
-    # 1.6.9 DIAGNOSTIC: no WHERE, no JOINs, no relations.
-    # Proves whether the Plugin Manager can read this install's SQLite at all.
-    # If /query still returns Data:null, the PM is not reading the plugin DB
-    # (platform issue). If Data has rows, restore filtered query in 1.6.10.
+    # Org-wide side menu page: all apps for this install (one ArgoCD per org).
+    # No per-component / per-env filtering — avoids Plugin Manager 500s
+    # from WHERE placeholders and enable-time relations.
     query: >
-      SELECT name, component, sync_status, health_status, namespace, last_synced, url
-      FROM argocd_apps
+      SELECT a.name, e.slug AS env, a.component, a.sync_status, a.health_status,
+             a.namespace, a.last_synced, a.url
+      FROM argocd_apps AS a
+      JOIN environments AS e ON e.id = a.environment_id
+      JOIN organizations AS o ON o.id = e.organization_id
     columns:
       - value: name
         title: Application
+        type: string
+      - value: env
+        title: Environment
         type: string
       - value: component
         title: Component

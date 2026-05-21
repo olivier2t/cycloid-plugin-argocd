@@ -1,37 +1,31 @@
 # Cycloid plugin — ArgoCD
 
 A Cycloid plugin that imports ArgoCD applications into the Cycloid Plugin
-Manager and renders them as an **ArgoCD** tab on every component page.
+Manager and shows them on an **ArgoCD** entry in the organization **side menu**.
 
-Each row represents one ArgoCD application. Columns:
+Each row is one ArgoCD application (all envs and components for the org in one
+table). Columns: Application, Environment, Component, Sync, Health, Namespace,
+Last Synced, Link.
 
-| Application | Sync | Health | Namespace | Last Synced | Link |
+Data is refreshed on plugin startup and whenever you click **Resync** in the
+Cycloid UI. There is **no** per-component or per-environment filtering in the
+widget SQL — that kept causing Plugin Manager errors on this platform.
 
-Data is refreshed on every widget render and whenever you click **Resync** in
-the Cycloid UI.
+## Why `table + sideMenuPage`
 
-## Why this is a `table` widget, not an `iframe`
-
-The Cycloid widgets reference accepts the four combinations
-{`table`,`iframe`} × {`component`,`sideMenuPage`}, but in practice only three
-have a renderer in the Cycloid console today:
-
-- `table + component` ✅ — what this plugin uses
-- `table + sideMenuPage` ✅
-- `iframe + sideMenuPage` ✅
-- `iframe + component` ❌ — accepted by validation, silently dropped by the UI
-
-An earlier version of this plugin used `iframe + component` and never
-displayed a tab. See the `iframe-attempt` git history for that path.
+- `table + sideMenuPage` — what this plugin uses (org-wide sidebar page)
+- `table + component` — works technically, but per-component enable + SQL
+  filtering was fragile on our stack (422 / PM 500)
+- `iframe + component` — not rendered by the Cycloid UI
 
 ## Files
 
 | File             | Purpose                                                              |
 |------------------|----------------------------------------------------------------------|
-| `manifest.yaml`  | Install form: ArgoCD username + password, plus 2 auto-filled fields. |
-| `widgets.yaml`   | One `table` widget on `placement: component`, tab name **ArgoCD**.   |
+| `manifest.yaml`  | Install form: credentials, org slug, optional ArgoCD URL override.   |
+| `widgets.yaml`   | One `table` widget on `placement: sideMenuPage`, title **ArgoCD**.   |
 | `schema.sql`     | SQLite tables: `organizations`, `environments`, `argocd_apps`.       |
-| `server.ts`      | Node 22 server: SQLite open + migrate, per-context ArgoCD sync.      |
+| `server.ts`      | Node 22 server: SQLite open + migrate, org-wide ArgoCD sync.           |
 | `Dockerfile`     | `node:22-trixie-slim`, runs `.ts` directly with type-strip + sqlite. |
 | `package.json`   | Declares `type: module`. No runtime dependencies.                    |
 
@@ -41,44 +35,29 @@ No Bun, no `just`, no third-party libraries, no build step.
 
 ```
 ┌────────────────────────────────┐
-│ Cycloid console renders        │
-│ component (org=Y, env=Z) page  │
+│ Cycloid console — side menu    │
+│ “ArgoCD” page (org-wide)       │
 └─────────────────┬──────────────┘
-                  │ POST /_cy/resync
-                  │ (with CYCLOID_ORG_SLUG=Y, CYCLOID_ENV_SLUG=Z
-                  │  substituted from manifest.yaml ($ .org $) / ($ .env $))
+                  │ GET …/plugin_widgets/{id}/query
                   ▼
+┌──────────────────────────────────┐  SELECT all rows (no WHERE)
+│ Cycloid Plugin Manager           │ ─────────────────────────────────▶ SQLite
+└──────────────────────────────────┘     argocd_apps / environments
+
 ┌──────────────────────────────────┐  login + GET /api/v1/applications
-│ This container (Node 22)         │ ─────────────────────────────────▶ ArgoCD
-│   resyncCurrentContext()         │                                   argocd.Y-Z.demo…
+│ Plugin container (Node 22)         │ ─────────────────────────────────▶ ArgoCD
+│ on POST /_cy/resync                │     https://argocd.<org>.demo… or override
 └─────┬────────────────────────────┘
-      │ upsert rows for (Y, Z) into local SQLite
+      │ upsert into SQLite (env/component parsed from app name)
       ▼
-┌──────────────────────────────────┐  widget SQL with ($ .org $) / ($ .env $)
-│ Cycloid Plugin Manager           │ ─────────────────────────────────▶ SQLite tables
-│ substitutes placeholders, runs   │  WHERE o.slug='Y' AND e.slug='Z'  argocd_apps
-│ SELECT against plugin SQLite     │                                   environments
-└──────────────────────────────────┘                                   organizations
 ```
 
-1. Cycloid substitutes the `($ .org $)` / `($ .env $)` template variables
-   in `manifest.yaml`'s configuration defaults into the plugin container's
-   environment as `CYCLOID_ORG_SLUG` and `CYCLOID_ENV_SLUG`. These reflect
-   the *current widget context*, i.e. the component being rendered.
-2. The plugin starts, applies `schema.sql`, performs an initial sync for
-   that one `(org, env)`, and listens on `:8080`. It re-syncs that same
-   pair on every `POST /_cy/resync`.
-3. A sync logs into `https://argocd.<org>-<env>.demo.cycloid.io` with the
-   install-form credentials, fetches `/api/v1/applications`, then upserts
-   the rows into SQLite under `(org, env)`. Other `(org, env)` slices in
-   the DB are left intact.
-4. When the Cycloid console renders the component page, the widget's
-   `query:` SQL has `($ .org $)` / `($ .env $)` substituted and runs
-   against the plugin's SQLite, returning only the rows for that
-   `(org, env)`.
-
-No `PROXY_URL`, no Plugin Manager API calls from the plugin, no
-discovery — the substitution layer carries all the context.
+1. One plugin install per Cycloid org (`cycloid_org_slug` in the install form).
+2. On startup and `POST /_cy/resync`, the plugin logs into ArgoCD, fetches all
+   applications, parses `<org>-<env>-<component>` from each app name, and stores
+   rows in SQLite.
+3. The side-menu widget runs a simple `SELECT` with **no** `WHERE` and **no**
+   `relations:` on component enable — that combination caused PM 500 / UI 422.
 
 ## Install form
 
@@ -89,42 +68,18 @@ as `UPPER_CASE` environment variables into the container at runtime.
 |--------------------|---------------------|-----------------|------------------------------------------------------------|
 | `argocd_username`  | `ARGOCD_USERNAME`   | fill in         | Local ArgoCD account username used to log in.              |
 | `argocd_password`  | `ARGOCD_PASSWORD`   | fill in         | Password for the ArgoCD account. Treat as sensitive.       |
-| `cycloid_org_slug` | `CYCLOID_ORG_SLUG`  | leave default   | Auto-filled by Cycloid with `($ .org $)`. Do not edit.     |
-| `cycloid_env_slug` | `CYCLOID_ENV_SLUG`  | leave default   | Auto-filled by Cycloid with `($ .env $)`. Do not edit.     |
+| `cycloid_org_slug`    | `CYCLOID_ORG_SLUG`     | type your org canonical (e.g. `test09`)   |
+| `argocd_url_override` | `ARGOCD_URL_OVERRIDE`  | optional IP/URL if sandbox DNS is blocked |
+| `argocd_insecure_tls` | `ARGOCD_INSECURE_TLS`  | `true` when using IP override             |
 
-The last two fields are technically required by the install form, but their
-defaults are Cycloid template variables (`($ .org $)` / `($ .env $)`) that
-the Plugin Manager substitutes at runtime with the *current widget
-context*. Operators must not change them.
-
-The same credentials are used for **every** ArgoCD instance the plugin
-hits, so the local ArgoCD account must exist with the same
-username/password on each `argocd.<org>-<env>.demo.cycloid.io` you want to
-import from.
-
-The ArgoCD URL is **not** an install-time field. The plugin builds it
-per-render from `CYCLOID_ORG_SLUG` and `CYCLOID_ENV_SLUG`:
-
-```
-https://argocd.<CYCLOID_ORG_SLUG>-<CYCLOID_ENV_SLUG>.demo.cycloid.io
-```
-
-For example, a render in env `arhs` of org `cycloid-demo-cmp` fetches from
-`https://argocd.cycloid-demo-cmp-arhs.demo.cycloid.io/api/v1/applications`.
-If your ArgoCD instances don't follow this pattern, fork this plugin and
-adjust `argocdBaseUrl()` in `server.ts`.
+The ArgoCD URL defaults to `https://argocd.<cycloid_org_slug>.demo.cycloid.io`
+(one ArgoCD per org). Set `argocd_url_override` + `argocd_insecure_tls` when the
+plugin container cannot resolve public DNS (see troubleshooting below).
 
 Authentication uses ArgoCD's session API: at every resync the plugin POSTs
 the credentials to `<derived_url>/api/v1/session`, receives a JWT, and uses
 it as a Bearer token for `/api/v1/applications`. The JWT is never persisted;
 we log in again on each sync.
-
-Optional install-form fields (used together to bypass DNS in restricted sandboxes):
-
-| `key`                  | Env var                | Operator action | Description                                                                                |
-|------------------------|------------------------|-----------------|--------------------------------------------------------------------------------------------|
-| `argocd_url_override`  | `ARGOCD_URL_OVERRIDE`  | leave blank, or type an IP URL | Full URL (incl. scheme). When set, replaces the computed `https://argocd.<org>.demo.cycloid.io`. Use this if the plugin sandbox can't resolve the default hostname. |
-| `argocd_insecure_tls`  | `ARGOCD_INSECURE_TLS`  | leave blank, or type `true`    | Skips TLS certificate verification. Required when `argocd_url_override` points at an IP (cert hostname won't match). |
 
 Optional, set directly in the container (not in the install form):
 
@@ -171,38 +126,34 @@ Two ways out:
      host: `getent hosts argocd.<org>.demo.cycloid.io`)
    - `argocd_insecure_tls` = `true` (the cert won't match an IP host).
 
-## One-time per-component enable (Cycloid gotcha)
+## Where to find it in the UI
 
-Installing the plugin **does not** automatically wire it to existing
-components. For each component where you want the tab, you have to flip the
-plugin "enabled" relation:
+After install, open the organization **test09** (or your org) and look for
+**ArgoCD** in the **left sidebar** (side menu). No per-component enable step
+is required.
+
+Verify the org-level widget:
 
 ```sh
-# Find the plugin install id
-INSTALL_ID=$(curl -sS -H "Authorization: Bearer $CY_API_KEY" \
-  "$CY_API_URL/organizations/<org>/plugins" \
-  | jq -r '.data[] | select(.name == "ArgoCD") | .install.id')
+curl -sS -H "Authorization: Bearer $CY_API_KEY" \
+  "$CY_API_URL/organizations/<org>/plugin_widgets?placement=sideMenuPage" | jq .
 
-# Enable it on every component that should show the tab
-curl -sS -X PUT \
-  -H "Authorization: Bearer $CY_API_KEY" \
-  -H "Content-Type: application/vnd.cycloid.io.v1+json" \
-  -d '{"relations": {}, "enabled": true}' \
-  "$CY_API_URL/organizations/<org>/projects/<project>/environments/<env>/components/<component>/plugins/$INSTALL_ID/relation"
+WIDGET_ID=$(curl -sS -H "Authorization: Bearer $CY_API_KEY" \
+  "$CY_API_URL/organizations/<org>/plugin_widgets?placement=sideMenuPage" \
+  | jq -r '.data[] | select(.widget.query | contains("argocd_apps")) | .id' | head -1)
+
+curl -sS -H "Authorization: Bearer $CY_API_KEY" \
+  "$CY_API_URL/organizations/<org>/plugin_widgets/$WIDGET_ID/query" | jq .
 ```
-
-The Cycloid UI exposes the same toggle on the component's settings page.
-Without this step, the per-component `plugin_widgets` endpoint returns `[]`
-and the tab never renders.
 
 ## Build, push, install
 
 ```sh
-docker build -t docker.io/<your-namespace>/cycloid-plugin-argocd:1.5.0 .
-docker push docker.io/<your-namespace>/cycloid-plugin-argocd:1.5.0
+docker build -t docker.io/<your-namespace>/cycloid-plugin-argocd:1.7.0 .
+docker push docker.io/<your-namespace>/cycloid-plugin-argocd:1.7.0
 ```
 
-The image tag must be a valid semantic version (e.g. `1.5.0`).
+The image tag must match `package.json` (e.g. `1.7.0`).
 
 ### Via the Cycloid console (recommended)
 
@@ -211,12 +162,9 @@ releases. Use the console UI:
 
 1. **Plugin Registry → Plugins → ArgoCD → New version.** Paste the Docker
    image reference. Wait for `Successfully finished`.
-2. **Plugins → ArgoCD → Install** (or **Update**). Fill in
-   `argocd_username` and `argocd_password`. Leave the two `cycloid_*_slug`
-   fields at their default — they contain Cycloid template variables that
-   are substituted at runtime.
-3. Enable the plugin on each component (see the per-component gotcha
-   above).
+2. **Plugins → ArgoCD → Install** (or **Update**). Fill in credentials,
+   `cycloid_org_slug`, and URL override fields if needed.
+3. Open **ArgoCD** in the org side menu.
 
 ### Via the REST API
 
@@ -233,7 +181,7 @@ PLUGIN_ID=$(curl -sS -H "Authorization: Bearer $CY_API_KEY" \
 curl -sS -X POST \
   -H "Authorization: Bearer $CY_API_KEY" \
   -H "Content-Type: application/vnd.cycloid.io.v1+json" \
-  -d '{"url":"docker.io/<ns>/cycloid-plugin-argocd:1.5.0"}' \
+  -d '{"url":"docker.io/<ns>/cycloid-plugin-argocd:1.7.0"}' \
   "$CY_API_URL/organizations/$CY_ORG/plugin_registries/$REGISTRY_ID/plugins/$PLUGIN_ID/versions" \
   | jq '.data.id'
 VERSION_ID=...
@@ -247,8 +195,9 @@ curl -sS -X POST \
         "configuration": {
           "argocd_username": "<user>",
           "argocd_password": "<password>",
-          "cycloid_org_slug": "($ .org $)",
-          "cycloid_env_slug": "($ .env $)"
+          "cycloid_org_slug": "test09",
+          "argocd_url_override": "https://34.253.192.110",
+          "argocd_insecure_tls": "true"
         }
       }' \
   "$CY_API_URL/organizations/$CY_ORG/plugin_registries/$REGISTRY_ID/plugins/$PLUGIN_ID/versions/$VERSION_ID/install"
@@ -260,8 +209,9 @@ curl -sS -X POST \
 PORT=8080 \
 ARGOCD_USERNAME=admin \
 ARGOCD_PASSWORD='your-password' \
-CYCLOID_ORG_SLUG=cycloid-demo-cmp \
-CYCLOID_ENV_SLUG=arhs \
+CYCLOID_ORG_SLUG=test09 \
+ARGOCD_URL_OVERRIDE=https://34.253.192.110 \
+ARGOCD_INSECURE_TLS=true \
 DB_FILE=/tmp/argocd-plugin.db \
 node --experimental-strip-types --experimental-sqlite --watch server.ts
 ```
@@ -288,18 +238,12 @@ in `manifest.yaml`), the existing install becomes stale and must be
 uninstalled and reinstalled. From the Cycloid console: **Plugins → ArgoCD
 → Uninstall**, then publish the new version and install fresh.
 
-### From `1.4.x` (PROXY_URL / discovery)
+### From `1.6.x` (component tab + filtering)
 
-`1.5.0` removes the `PROXY_URL`-based discovery entirely. The plugin no
-longer calls the Plugin Manager API; it relies on the
-`($ .org $)` / `($ .env $)` template substitution in `manifest.yaml` to
-receive the current widget context as env vars.
-
-1. Uninstall the existing 1.4.x install.
-2. Publish `1.5.0`.
-3. Install with `argocd_username` + `argocd_password`. Leave the two
-   `cycloid_*_slug` fields at their template-variable defaults.
-4. Re-enable the plugin on each component.
+`1.7.0` moves the widget to `sideMenuPage` and removes SQL `WHERE` /
+`relations` filtering. Uninstall the old install, publish `1.7.0`, reinstall
+with `cycloid_org_slug` typed explicitly, then open **ArgoCD** in the org side
+menu (no per-component enable).
 
 ### From earlier versions
 
