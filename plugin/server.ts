@@ -172,10 +172,6 @@ function argocdAppUrl(conn: ArgoConn, project: string, name: string): string {
   return `https://${conn.tlsHost}/applications/${encodeURIComponent(proj)}/${encodeURIComponent(name)}`;
 }
 
-function argocdConsoleUrl(conn: ArgoConn): string {
-  return argocdAppUrl(conn, "argocd", "app-of-apps");
-}
-
 function formatTimestamp(iso: string): string {
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) return iso;
@@ -183,17 +179,6 @@ function formatTimestamp(iso: string): string {
     dateStyle: "medium",
     timeStyle: "short",
   });
-}
-
-function shortRevision(rev: string): string {
-  const r = rev.trim();
-  if (r.length <= 12) return r;
-  return r.slice(0, 7);
-}
-
-function extractRevision(app: ArgoApp): string {
-  const rev = app.status?.sync?.revision?.trim() ?? "";
-  return rev ? shortRevision(rev) : "—";
 }
 
 function extractCluster(app: ArgoApp): string {
@@ -206,11 +191,6 @@ function extractCluster(app: ArgoApp): string {
   } catch {
     return server.replace(/^https?:\/\//, "").split("/")[0] ?? server;
   }
-}
-
-function extractResourceCount(app: ArgoApp): string {
-  const n = app.status?.resources?.length;
-  return n !== undefined && n > 0 ? String(n) : "—";
 }
 
 function extractLastSynced(app: ArgoApp): string {
@@ -318,16 +298,14 @@ type AppRow = {
   last_synced: string;
   url: string;
   project: string;
-  revision: string;
   cluster: string;
-  resources: string;
 };
 
 function listAppsFromDb(): AppRow[] {
   return db
     .prepare(
       `SELECT a.name, e.slug AS env, a.component, a.health_status, a.namespace,
-              a.last_synced, a.url, a.project, a.revision, a.cluster, a.resources
+              a.last_synced, a.url, a.project, a.cluster
        FROM argocd_apps AS a
        JOIN environments AS e ON e.id = a.environment_id
        ORDER BY e.slug, a.component, a.name`,
@@ -352,32 +330,29 @@ function escapeHtml(s: string): string {
     .replaceAll('"', "&quot;");
 }
 
-function renderAppsPage(rows: AppRow[], consoleUrl: string): string {
+function renderAppsPage(rows: AppRow[]): string {
   const table =
     rows.length === 0
       ? `<p class="empty">No Cycloid applications in ArgoCD yet. Click <strong>Refresh</strong> to pull the latest state.</p>`
       : `<div class="table-wrap"><table>
   <thead><tr>
     <th>Application</th><th>Environment</th><th>Component</th><th>Project</th>
-    <th>Revision</th><th>Cluster</th><th>Health</th><th>Resources</th>
-    <th>Namespace</th><th>Last reconciled</th><th></th>
+    <th>Cluster</th><th>Health</th><th>Namespace</th><th>Last reconciled</th><th></th>
   </tr></thead>
   <tbody>${rows
     .map((r) => {
       const health = r.health_status?.trim() || "—";
       const link = r.url
-        ? `<a class="argo-ext" href="${escapeHtml(r.url)}" title="Open in ArgoCD">Open in ArgoCD</a>`
+        ? `<button type="button" class="btn-link argo-open" data-url="${escapeHtml(r.url)}">Open in ArgoCD</button>`
         : "";
       return `<tr>
-    <td class="mono">${escapeHtml(r.name)}</td>
+    <td class="mono nowrap">${escapeHtml(r.name)}</td>
     <td>${escapeHtml(r.env)}</td>
     <td>${escapeHtml(r.component)}</td>
     <td>${escapeHtml(r.project || "—")}</td>
-    <td class="mono">${escapeHtml(r.revision || "—")}</td>
     <td>${escapeHtml(r.cluster || "—")}</td>
     <td><span class="${healthBadgeClass(health)}">${escapeHtml(health)}</span></td>
-    <td class="num">${escapeHtml(r.resources || "—")}</td>
-    <td class="mono">${escapeHtml(r.namespace)}</td>
+    <td class="mono nowrap">${escapeHtml(r.namespace)}</td>
     <td class="muted">${escapeHtml(r.last_synced || "—")}</td>
     <td>${link}</td>
   </tr>`;
@@ -467,15 +442,16 @@ function renderAppsPage(rows: AppRow[], consoleUrl: string): string {
     td { padding: 0.6rem 0.85rem; border-bottom: 1px solid var(--argo-border); vertical-align: middle; }
     tr:hover td { background: #f8f9fd; }
     .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.8rem; }
-    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .nowrap { white-space: nowrap; }
     .muted { color: var(--argo-muted); white-space: nowrap; }
     .empty { padding: 2rem; text-align: center; color: var(--argo-muted); }
-    a.argo-ext {
+    .btn-link {
+      background: none; border: none; padding: 0;
       color: var(--argo-orange-dark);
-      font-weight: 600;
-      text-decoration: none;
+      font: inherit; font-weight: 600;
+      cursor: pointer; text-decoration: underline;
     }
-    a.argo-ext:hover { text-decoration: underline; }
+    .btn-link:hover { color: var(--argo-orange); }
     .badge {
       display: inline-block; padding: 0.15rem 0.5rem;
       border-radius: 999px; font-size: 0.75rem; font-weight: 600;
@@ -494,7 +470,7 @@ function renderAppsPage(rows: AppRow[], consoleUrl: string): string {
       <img src="${ARGOCD_LOGO_URL}" alt="Argo CD" width="48" height="48" />
       <div class="header-text">
         <h1>Argo CD applications</h1>
-        <p>GitOps apps for this Cycloid organization · <a class="argo-ext" href="${escapeHtml(consoleUrl)}">App of apps</a></p>
+        <p>GitOps apps for this Cycloid organization</p>
       </div>
       <div class="header-actions">
         <button type="button" class="btn btn-primary" id="btn-refresh">Refresh</button>
@@ -504,20 +480,34 @@ function renderAppsPage(rows: AppRow[], consoleUrl: string): string {
     <section class="card">${table}</section>
   </div>
   <script>
+    // Never navigate the plugin iframe to ArgoCD (CORS blank page). Open from
+    // the Cycloid top window so the new tab is not sandboxed.
     function openArgoExternal(url) {
+      let opened = false;
       try {
-        const topWin = window.top ?? window;
-        const w = topWin.open(url, "_blank", "noopener,noreferrer");
-        if (!w) topWin.location.assign(url);
-      } catch {
-        window.location.assign(url);
+        const topWin = window.top;
+        if (topWin && topWin !== window) {
+          const w = topWin.open(url, "_blank", "noopener,noreferrer");
+          if (w) opened = true;
+        }
+      } catch { /* cross-origin access to top */ }
+      if (!opened) {
+        const w = window.open(url, "_blank", "noopener,noreferrer");
+        if (w) opened = true;
+      }
+      if (!opened) {
+        const statusEl = document.getElementById("status");
+        if (statusEl) {
+          statusEl.className = "status err";
+          statusEl.textContent = "Popup blocked. Allow popups for Cycloid, or copy: " + url;
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(url).catch(() => {});
+        }
       }
     }
-    document.querySelectorAll("a.argo-ext").forEach((el) => {
-      el.addEventListener("click", (e) => {
-        e.preventDefault();
-        openArgoExternal(el.href);
-      });
+    document.querySelectorAll(".argo-open").forEach((el) => {
+      el.addEventListener("click", () => openArgoExternal(el.dataset.url || ""));
     });
     const btn = document.getElementById("btn-refresh");
     const statusEl = document.getElementById("status");
@@ -664,9 +654,9 @@ async function resync(): Promise<{ started: boolean; reason?: string; apps?: num
             extractLastSynced(app),
             argocdAppUrl(conn, project, name),
             project,
-            extractRevision(app),
+            "",
             extractCluster(app),
-            extractResourceCount(app),
+            "",
             envId,
           );
           inserted++;
@@ -727,10 +717,7 @@ const server = createServer((req, res) => {
   }
 
   if (method === "GET" && (pathname === "/" || pathname === "/index.html")) {
-    const consoleUrl = CYCLOID_ORG_SLUG
-      ? argocdConsoleUrl(argocdConnection(CYCLOID_ORG_SLUG))
-      : "#";
-    return send(res, 200, renderAppsPage(listAppsFromDb(), consoleUrl), "text/html; charset=utf-8");
+    return send(res, 200, renderAppsPage(listAppsFromDb()), "text/html; charset=utf-8");
   }
 
   if (method === "POST" && (pathname === "/api/refresh" || pathname === "api/refresh")) {
