@@ -270,13 +270,16 @@ async function argocdListApps(conn: ArgoConn, token: string): Promise<ArgoApp[]>
   return parsed.items ?? [];
 }
 
+// Hard refresh: GET /api/v1/applications/{name}?refresh=hard
+// This is the same call the ArgoCD UI makes when you click Refresh → Hard.
+// It invalidates the manifest cache and forces re-read from the git repo.
 async function argocdRefreshApp(
   conn: ArgoConn,
   token: string,
   name: string,
 ): Promise<void> {
   const url = new URL(
-    `/api/v1/applications/${encodeURIComponent(name)}/refresh`,
+    `/api/v1/applications/${encodeURIComponent(name)}`,
     conn.connectUrl,
   );
   url.searchParams.set("refresh", "hard");
