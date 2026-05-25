@@ -205,7 +205,7 @@ function extractIngressUrl(
     const first = urls[0].trim();
     if (first) return first.startsWith("http") ? first : `https://${first}`;
   }
-  return `https://${component}.${org}-${env}.demo.cycloid.io`;
+  return `https://${component}.${org}.demo.cycloid.io`;
 }
 
 function extractCluster(app: ArgoApp): string {
