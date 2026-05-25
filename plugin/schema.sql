@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS argocd_apps (
     revision       TEXT,
     cluster        TEXT,
     resources      TEXT,
+    ingress_url    TEXT,
 
     environment_id TEXT NOT NULL,
 

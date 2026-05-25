@@ -82,6 +82,7 @@ for (const sql of [
   "ALTER TABLE argocd_apps ADD COLUMN revision TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE argocd_apps ADD COLUMN cluster TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE argocd_apps ADD COLUMN resources TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE argocd_apps ADD COLUMN ingress_url TEXT NOT NULL DEFAULT ''",
 ]) {
   try {
     db.exec(sql);
@@ -158,6 +159,7 @@ type ArgoApp = {
     health?: { status?: string };
     reconciledAt?: string;
     resources?: unknown[];
+    summary?: { externalURLs?: string[] };
     history?: Array<{ deployedAt?: string }>;
     operationState?: {
       phase?: string;
@@ -190,6 +192,20 @@ function formatTimestamp(iso: string): string {
     dateStyle: "medium",
     timeStyle: "short",
   });
+}
+
+function extractIngressUrl(
+  app: ArgoApp,
+  org: string,
+  env: string,
+  component: string,
+): string {
+  const urls = app.status?.summary?.externalURLs;
+  if (urls && urls.length > 0) {
+    const first = urls[0].trim();
+    if (first) return first.startsWith("http") ? first : `https://${first}`;
+  }
+  return `https://${component}.${org}-${env}.demo.cycloid.io`;
 }
 
 function extractCluster(app: ArgoApp): string {
@@ -310,13 +326,14 @@ type AppRow = {
   url: string;
   project: string;
   cluster: string;
+  ingress_url: string;
 };
 
 function listAppsFromDb(): AppRow[] {
   return db
     .prepare(
       `SELECT a.name, e.slug AS env, a.component, a.health_status, a.namespace,
-              a.last_synced, a.url, a.project, a.cluster
+              a.last_synced, a.url, a.project, a.cluster, a.ingress_url
        FROM argocd_apps AS a
        JOIN environments AS e ON e.id = a.environment_id
        ORDER BY e.slug, a.component, a.name`,
@@ -348,11 +365,15 @@ function renderAppsPage(rows: AppRow[], consoleUrl: string): string {
       : `<div class="table-wrap"><table>
   <thead><tr>
     <th>Application</th><th>Environment</th><th>Component</th><th>Project</th>
-    <th>Cluster</th><th>Health</th><th>Namespace</th><th>Last reconciled</th>
+    <th>Cluster</th><th>Health</th><th>Namespace</th><th>Last reconciled</th><th>App URL</th>
   </tr></thead>
   <tbody>${rows
     .map((r) => {
       const health = r.health_status?.trim() || "—";
+      const ingress = r.ingress_url?.trim() || "";
+      const ingressCell = ingress
+        ? `<a class="ingress-link" href="${escapeHtml(ingress)}" title="${escapeHtml(ingress)}">${escapeHtml(new URL(ingress).hostname)}</a>`
+        : "—";
       return `<tr>
     <td class="mono nowrap">${escapeHtml(r.name)}</td>
     <td>${escapeHtml(r.env)}</td>
@@ -362,6 +383,7 @@ function renderAppsPage(rows: AppRow[], consoleUrl: string): string {
     <td><span class="${healthBadgeClass(health)}">${escapeHtml(health)}</span></td>
     <td class="mono nowrap">${escapeHtml(r.namespace)}</td>
     <td class="muted">${escapeHtml(r.last_synced || "—")}</td>
+    <td class="nowrap">${ingressCell}</td>
   </tr>`;
     })
     .join("")}</tbody>
@@ -474,6 +496,12 @@ function renderAppsPage(rows: AppRow[], consoleUrl: string): string {
       cursor: text;
     }
     .url-input:focus { outline: 2px solid var(--argo-orange); outline-offset: -1px; }
+    .ingress-link {
+      color: var(--argo-orange-dark);
+      font-weight: 600; font-size: 0.8rem;
+      text-decoration: none;
+    }
+    .ingress-link:hover { text-decoration: underline; }
     .status { font-size: 0.8rem; color: var(--argo-muted); min-height: 1.2em; }
     .status.err { color: #b02a37; }
   </style>
@@ -648,8 +676,8 @@ async function resync(): Promise<{ started: boolean; reason?: string; apps?: num
       const insertApp = db.prepare(`
         INSERT INTO argocd_apps
           (id, name, component, sync_status, health_status, namespace, last_synced, url,
-           project, revision, cluster, resources, environment_id)
-        VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           project, revision, cluster, resources, ingress_url, environment_id)
+        VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       let inserted = 0;
@@ -672,6 +700,7 @@ async function resync(): Promise<{ started: boolean; reason?: string; apps?: num
             "",
             extractCluster(app),
             "",
+            extractIngressUrl(app, org, env, component),
             envId,
           );
           inserted++;
