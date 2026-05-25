@@ -559,7 +559,12 @@ function renderAppsPage(rows: AppRow[], consoleUrl: string): string {
       statusEl.className = "status";
       statusEl.textContent = "Refreshing manifests in Argo CD and updating the table…";
       try {
-        const res = await fetch(new URL("api/refresh", window.location.href), {
+        // Use path relative to the iframe document. The Cycloid proxy serves
+        // the plugin at /iframe/… on the container; the browser sees a deep
+        // console URL. A bare "./api/refresh" resolves against that deep URL,
+        // keeping the same origin + proxy path so the request reaches us.
+        const base = window.location.pathname.replace(/\/$/, "");
+        const res = await fetch(base + "/api/refresh", {
           method: "POST",
         });
         const data = await res.json().catch(() => ({}));
