@@ -149,7 +149,7 @@ const ARGOCD_LOGO_URL =
   "https://raw.githubusercontent.com/cncf/artwork/main/projects/argo/icon/color/argo-icon-color.svg";
 
 type ArgoApp = {
-  metadata?: { name?: string };
+  metadata?: { name?: string; labels?: Record<string, string> };
   spec?: {
     project?: string;
     destination?: { namespace?: string; name?: string; server?: string };
@@ -292,14 +292,13 @@ async function argocdRefreshApp(
 }
 
 // ─── Name parser ──────────────────────────────────────────────────────────────
-// ArgoCD apps in Cycloid follow the naming convention
-//   "<org>-<env>-<component>"
-// in both metadata.name and spec.destination.namespace. We know the org at
-// install time, so we strip the "<org>-" prefix; the first remaining
-// hyphen-separated segment is the env, and the rest is the component.
+// ArgoCD apps in Cycloid can follow two naming conventions:
+//   1. "<org>-<env>-<component>"  (e.g. test09-dev-pr1)
+//   2. "<org>-<component>"        (e.g. test13-pr1, no env in name)
 //
-// Assumption: env canonicals do not contain hyphens. Component canonicals
-// may contain hyphens (we just take everything after the first split).
+// We try the 3-part split first; if there's no second dash we treat the
+// remainder as the component and leave env empty (caller fills it in from
+// labels, namespace, or a default).
 function parseAppName(
   name: string,
   org: string,
@@ -307,12 +306,15 @@ function parseAppName(
   const prefix = `${org}-`;
   if (!name.startsWith(prefix)) return null;
   const rest = name.slice(prefix.length);
+  if (!rest) return null;
   const firstDash = rest.indexOf("-");
-  if (firstDash <= 0) return null;
-  const env = rest.slice(0, firstDash);
-  const component = rest.slice(firstDash + 1);
-  if (!env || !component) return null;
-  return { env, component };
+  if (firstDash > 0) {
+    const env = rest.slice(0, firstDash);
+    const component = rest.slice(firstDash + 1);
+    if (env && component) return { env, component };
+  }
+  // No dash → <org>-<component> format (env unknown)
+  return { env: "", component: rest };
 }
 
 // ─── UI (iframe side menu) ────────────────────────────────────────────────────
@@ -654,19 +656,31 @@ async function resync(): Promise<{ started: boolean; reason?: string; apps?: num
         parseAppName(name, org) ??
         parseAppName(app.spec?.destination?.namespace ?? "", org);
       if (!parsed) {
-        // Apps that don't match the convention are typically umbrella/
-        // bootstrap apps (e.g. an "app-of-apps" parent). They aren't tied
-        // to a single Cycloid component, so they have no component tab to
-        // render on — silently skip and count them.
         console.log(
-          `[INFO] no component mapping for app '${name}': not '${org}-<env>-<component>', skipping`,
+          `[INFO] no component mapping for app '${name}': not '${org}-…', skipping`,
         );
         skipped++;
         continue;
       }
-      const list = byEnv.get(parsed.env) ?? [];
-      list.push({ app, env: parsed.env, component: parsed.component });
-      byEnv.set(parsed.env, list);
+      // Resolve env when name format is <org>-<component> (no env segment).
+      // Try: ArgoCD labels → namespace parse → fallback "default".
+      let env = parsed.env;
+      if (!env) {
+        const labels = app.metadata?.labels ?? {};
+        env =
+          labels["cycloid.io/env"] ??
+          labels["env"] ??
+          labels["environment"] ??
+          "";
+      }
+      if (!env) {
+        const nsParsed = parseAppName(app.spec?.destination?.namespace ?? "", org);
+        if (nsParsed?.env) env = nsParsed.env;
+      }
+      if (!env) env = "default";
+      const list = byEnv.get(env) ?? [];
+      list.push({ app, env, component: parsed.component });
+      byEnv.set(env, list);
     }
 
     db.exec("BEGIN");
