@@ -33,7 +33,7 @@ function normaliseDbFile(raw: string | undefined): string {
 }
 const DB_FILE = normaliseDbFile(process.env.DB_FILE);
 
-const SYNC_INSECURE_TLS = process.env.ARGOCD_INSECURE_TLS === "true";
+const SYNC_INSECURE_TLS = true;
 
 function stripTrailingSlash(s: string): string {
   return s.endsWith("/") ? s.slice(0, -1) : s;
@@ -167,9 +167,20 @@ type ArgoApp = {
   };
 };
 
+// Cycloid demo stacks register apps under the "argocd" project, not "default".
+const ARGOCD_UI_PROJECT = "argocd";
+
+function argocdProject(app: ArgoApp): string {
+  return app.spec?.project?.trim() || ARGOCD_UI_PROJECT;
+}
+
 function argocdAppUrl(conn: ArgoConn, project: string, name: string): string {
-  const proj = project || "default";
+  const proj = project || ARGOCD_UI_PROJECT;
   return `https://${conn.tlsHost}/applications/${encodeURIComponent(proj)}/${encodeURIComponent(name)}`;
+}
+
+function argocdConsoleUrl(conn: ArgoConn): string {
+  return argocdAppUrl(conn, ARGOCD_UI_PROJECT, "app-of-apps");
 }
 
 function formatTimestamp(iso: string): string {
@@ -330,21 +341,18 @@ function escapeHtml(s: string): string {
     .replaceAll('"', "&quot;");
 }
 
-function renderAppsPage(rows: AppRow[]): string {
+function renderAppsPage(rows: AppRow[], consoleUrl: string): string {
   const table =
     rows.length === 0
       ? `<p class="empty">No Cycloid applications in ArgoCD yet. Click <strong>Refresh</strong> to pull the latest state.</p>`
       : `<div class="table-wrap"><table>
   <thead><tr>
     <th>Application</th><th>Environment</th><th>Component</th><th>Project</th>
-    <th>Cluster</th><th>Health</th><th>Namespace</th><th>Last reconciled</th><th></th>
+    <th>Cluster</th><th>Health</th><th>Namespace</th><th>Last reconciled</th>
   </tr></thead>
   <tbody>${rows
     .map((r) => {
       const health = r.health_status?.trim() || "—";
-      const link = r.url
-        ? `<button type="button" class="btn-link argo-open" data-url="${escapeHtml(r.url)}">Open in ArgoCD</button>`
-        : "";
       return `<tr>
     <td class="mono nowrap">${escapeHtml(r.name)}</td>
     <td>${escapeHtml(r.env)}</td>
@@ -354,7 +362,6 @@ function renderAppsPage(rows: AppRow[]): string {
     <td><span class="${healthBadgeClass(health)}">${escapeHtml(health)}</span></td>
     <td class="mono nowrap">${escapeHtml(r.namespace)}</td>
     <td class="muted">${escapeHtml(r.last_synced || "—")}</td>
-    <td>${link}</td>
   </tr>`;
     })
     .join("")}</tbody>
@@ -445,13 +452,6 @@ function renderAppsPage(rows: AppRow[]): string {
     .nowrap { white-space: nowrap; }
     .muted { color: var(--argo-muted); white-space: nowrap; }
     .empty { padding: 2rem; text-align: center; color: var(--argo-muted); }
-    .btn-link {
-      background: none; border: none; padding: 0;
-      color: var(--argo-orange-dark);
-      font: inherit; font-weight: 600;
-      cursor: pointer; text-decoration: underline;
-    }
-    .btn-link:hover { color: var(--argo-orange); }
     .badge {
       display: inline-block; padding: 0.15rem 0.5rem;
       border-radius: 999px; font-size: 0.75rem; font-weight: 600;
@@ -460,6 +460,20 @@ function renderAppsPage(rows: AppRow[]): string {
     .badge-progressing { background: #fff3cd; color: #856404; }
     .badge-degraded { background: #f8d7da; color: #721c24; }
     .badge-unknown { background: #e9ecef; color: #495057; }
+    .url-group { display: flex; gap: 0.35rem; align-items: center; }
+    .url-input {
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 0.8rem;
+      padding: 0.45rem 0.65rem;
+      border: 1px solid var(--argo-border);
+      border-radius: 8px;
+      background: var(--argo-bg);
+      color: var(--argo-text);
+      width: 26rem;
+      max-width: 50vw;
+      cursor: text;
+    }
+    .url-input:focus { outline: 2px solid var(--argo-orange); outline-offset: -1px; }
     .status { font-size: 0.8rem; color: var(--argo-muted); min-height: 1.2em; }
     .status.err { color: #b02a37; }
   </style>
@@ -473,6 +487,10 @@ function renderAppsPage(rows: AppRow[]): string {
         <p>GitOps apps for this Cycloid organization</p>
       </div>
       <div class="header-actions">
+        <div class="url-group">
+          <input type="text" readonly class="url-input" id="argo-url" value="${escapeHtml(consoleUrl)}" />
+          <button type="button" class="btn btn-secondary" id="btn-copy-url">Copy URL</button>
+        </div>
         <button type="button" class="btn btn-primary" id="btn-refresh">Refresh</button>
       </div>
     </header>
@@ -480,34 +498,31 @@ function renderAppsPage(rows: AppRow[]): string {
     <section class="card">${table}</section>
   </div>
   <script>
-    // Never navigate the plugin iframe to ArgoCD (CORS blank page). Open from
-    // the Cycloid top window so the new tab is not sandboxed.
-    function openArgoExternal(url) {
-      let opened = false;
-      try {
-        const topWin = window.top;
-        if (topWin && topWin !== window) {
-          const w = topWin.open(url, "_blank", "noopener,noreferrer");
-          if (w) opened = true;
-        }
-      } catch { /* cross-origin access to top */ }
-      if (!opened) {
-        const w = window.open(url, "_blank", "noopener,noreferrer");
-        if (w) opened = true;
+    // Cycloid plugin iframe is sandboxed without allow-popups-to-escape-sandbox.
+    // Any new tab opened from here inherits the sandbox (localStorage blocked →
+    // ArgoCD JS crashes). We cannot open a working ArgoCD tab from this context.
+    // Instead, show the URL and let the user paste it in a fresh tab.
+    const urlInput = document.getElementById("argo-url");
+    const copyBtn = document.getElementById("btn-copy-url");
+    urlInput?.addEventListener("click", () => { urlInput.select(); });
+    copyBtn?.addEventListener("click", () => {
+      const url = urlInput?.value || "";
+      if (!url) return;
+      urlInput.select();
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(url).then(() => {
+          copyBtn.textContent = "Copied!";
+          setTimeout(() => { copyBtn.textContent = "Copy URL"; }, 1500);
+        }).catch(() => {
+          document.execCommand("copy");
+          copyBtn.textContent = "Copied!";
+          setTimeout(() => { copyBtn.textContent = "Copy URL"; }, 1500);
+        });
+      } else {
+        document.execCommand("copy");
+        copyBtn.textContent = "Copied!";
+        setTimeout(() => { copyBtn.textContent = "Copy URL"; }, 1500);
       }
-      if (!opened) {
-        const statusEl = document.getElementById("status");
-        if (statusEl) {
-          statusEl.className = "status err";
-          statusEl.textContent = "Popup blocked. Allow popups for Cycloid, or copy: " + url;
-        }
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(url).catch(() => {});
-        }
-      }
-    }
-    document.querySelectorAll(".argo-open").forEach((el) => {
-      el.addEventListener("click", () => openArgoExternal(el.dataset.url || ""));
     });
     const btn = document.getElementById("btn-refresh");
     const statusEl = document.getElementById("status");
@@ -644,7 +659,7 @@ async function resync(): Promise<{ started: boolean; reason?: string; apps?: num
         deleteAppsForEnv.run(envId);
         for (const { app, component } of list) {
           const name = app.metadata?.name ?? "";
-          const project = app.spec?.project?.trim() || "default";
+          const project = argocdProject(app);
           insertApp.run(
             `${envId}-${name}`,
             name,
@@ -717,7 +732,10 @@ const server = createServer((req, res) => {
   }
 
   if (method === "GET" && (pathname === "/" || pathname === "/index.html")) {
-    return send(res, 200, renderAppsPage(listAppsFromDb()), "text/html; charset=utf-8");
+    const consoleUrl = CYCLOID_ORG_SLUG
+      ? argocdConsoleUrl(argocdConnection(CYCLOID_ORG_SLUG))
+      : "";
+    return send(res, 200, renderAppsPage(listAppsFromDb(), consoleUrl), "text/html; charset=utf-8");
   }
 
   if (method === "POST" && (pathname === "/api/refresh" || pathname === "api/refresh")) {

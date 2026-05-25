@@ -11,6 +11,7 @@ configuration:
     key: argocd_username
     widget: simple_text
     type: string
+    default: "admin"
     required: true
 
   - name: "ArgoCD Password"
@@ -36,17 +37,8 @@ configuration:
   # raw IP here and also set argocd_insecure_tls=true so the IP-vs-cert
   # hostname mismatch doesn't fail the TLS handshake.
   - name: "ArgoCD URL (optional override)"
-    description: "Leave blank to use https://argocd.<org>.demo.cycloid.io. Set when the plugin container's DNS can't see the public hostname (e.g. https://34.253.192.110 to skip DNS) — then also set 'Skip ArgoCD TLS verification' below to true."
+    description: "Leave blank to use https://argocd.<org>.demo.cycloid.io. Set when the plugin container's DNS can't see the public hostname (e.g. https://34.253.192.110 to skip DNS)."
     key: argocd_url_override
-    widget: simple_text
-    type: string
-    required: false
-
-  # Toggle for ARGOCD_INSECURE_TLS. Use only when pointing at an IP via the
-  # URL override above, or when ArgoCD has a self-signed cert.
-  - name: "Skip ArgoCD TLS verification"
-    description: "Type 'true' to disable TLS certificate verification when calling ArgoCD. Required when the URL override points at an IP address (cert hostname won't match). Leave blank otherwise."
-    key: argocd_insecure_tls
     widget: simple_text
     type: string
     required: false
