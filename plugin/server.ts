@@ -691,10 +691,16 @@ async function resync(): Promise<{ started: boolean; reason?: string; apps?: num
       const orgId = `org-${org}`;
       db.prepare("INSERT OR IGNORE INTO organizations (id, slug) VALUES (?, ?)").run(orgId, org);
 
+      // Wipe ALL apps for this org so deleted ArgoCD apps disappear.
+      db.prepare(
+        `DELETE FROM argocd_apps WHERE environment_id IN (
+           SELECT e.id FROM environments e WHERE e.organization_id = ?
+         )`,
+      ).run(orgId);
+
       const insertEnv = db.prepare(
         "INSERT OR IGNORE INTO environments (id, slug, organization_id) VALUES (?, ?, ?)",
       );
-      const deleteAppsForEnv = db.prepare("DELETE FROM argocd_apps WHERE environment_id = ?");
       const insertApp = db.prepare(`
         INSERT INTO argocd_apps
           (id, name, component, sync_status, health_status, namespace, last_synced, url,
@@ -706,7 +712,6 @@ async function resync(): Promise<{ started: boolean; reason?: string; apps?: num
       for (const [env, list] of byEnv) {
         const envId = `env-${org}-${env}`;
         insertEnv.run(envId, env, orgId);
-        deleteAppsForEnv.run(envId);
         for (const { app, component } of list) {
           const name = app.metadata?.name ?? "";
           const project = argocdProject(app);
