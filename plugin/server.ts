@@ -306,9 +306,12 @@ function parseAppName(
   name: string,
   org: string,
 ): { env: string; component: string } | null {
-  const prefix = `${org}-`;
-  if (!name.startsWith(prefix)) return null;
-  const rest = name.slice(prefix.length);
+  const n = name.trim().toLowerCase();
+  const o = org.trim().toLowerCase();
+  if (!n || !o) return null;
+  const prefix = `${o}-`;
+  if (!n.startsWith(prefix)) return null;
+  const rest = n.slice(prefix.length);
   if (!rest) return null;
   const firstDash = rest.indexOf("-");
   if (firstDash > 0) {
@@ -318,6 +321,37 @@ function parseAppName(
   }
   // No dash → <org>-<component> format (env unknown)
   return { env: "", component: rest };
+}
+
+const SKIP_APP_NAMES = new Set(["app-of-apps", "app-of-apps-root"]);
+
+function mapArgoApp(
+  app: ArgoApp,
+  org: string,
+): { app: ArgoApp; env: string; component: string } | null {
+  const name = app.metadata?.name?.trim() ?? "";
+  if (!name || SKIP_APP_NAMES.has(name.toLowerCase())) return null;
+
+  const parsed =
+    parseAppName(name, org) ?? parseAppName(app.spec?.destination?.namespace ?? "", org);
+  if (!parsed) return null;
+
+  let env = parsed.env;
+  if (!env) {
+    const labels = app.metadata?.labels ?? {};
+    env =
+      labels["cycloid.io/env"] ??
+      labels["env"] ??
+      labels["environment"] ??
+      "";
+  }
+  if (!env) {
+    const nsParsed = parseAppName(app.spec?.destination?.namespace ?? "", org);
+    if (nsParsed?.env) env = nsParsed.env;
+  }
+  if (!env) env = "default";
+
+  return { app, env, component: parsed.component };
 }
 
 // ─── UI (iframe side menu) ────────────────────────────────────────────────────
@@ -337,13 +371,21 @@ type AppRow = {
 function listAppsFromDb(): AppRow[] {
   return db
     .prepare(
-      `SELECT a.name, e.slug AS env, a.component, a.health_status, a.namespace,
+      `SELECT a.name, COALESCE(e.slug, '') AS env, a.component, a.health_status, a.namespace,
               a.last_synced, a.url, a.project, a.cluster, a.ingress_url
        FROM argocd_apps AS a
-       JOIN environments AS e ON e.id = a.environment_id
+       LEFT JOIN environments AS e ON e.id = a.environment_id
        ORDER BY e.slug, a.component, a.name`,
     )
     .all() as AppRow[];
+}
+
+function ingressHostname(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url.replace(/^https?:\/\//, "").split("/")[0] ?? url;
+  }
 }
 
 function healthBadgeClass(status: string): string {
@@ -377,7 +419,7 @@ function renderAppsPage(rows: AppRow[], consoleUrl: string): string {
       const health = r.health_status?.trim() || "—";
       const ingress = r.ingress_url?.trim() || "";
       const ingressCell = ingress
-        ? `<a class="ingress-link" href="${escapeHtml(ingress)}" title="${escapeHtml(ingress)}">${escapeHtml(new URL(ingress).hostname)}</a>`
+        ? `<a class="ingress-link" href="${escapeHtml(ingress)}" title="${escapeHtml(ingress)}">${escapeHtml(ingressHostname(ingress))}</a>`
         : "—";
       return `<tr>
     <td class="mono nowrap">${escapeHtml(r.name)}</td>
@@ -574,7 +616,12 @@ function renderAppsPage(rows: AppRow[], consoleUrl: string): string {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || "Refresh failed (" + res.status + ")");
-        statusEl.textContent = "Done — reloaded.";
+        const n = data.apps ?? 0;
+        const skipped = data.skipped ?? 0;
+        statusEl.textContent =
+          n > 0
+            ? "Synced " + n + " app(s) from Argo CD. Reloading…"
+            : "Argo CD returned no Cycloid apps for org '" + (data.org || "?") + "' (" + skipped + " skipped). Reloading…";
         location.reload();
       } catch (err) {
         statusEl.className = "status err";
@@ -590,18 +637,15 @@ function renderAppsPage(rows: AppRow[], consoleUrl: string): string {
 // ─── Refresh + resync ─────────────────────────────────────────────────────────
 let resyncRunning = false;
 
-async function refreshAllApps(): Promise<{ refreshed: number; failed: number }> {
-  if (!ARGOCD_USERNAME || !ARGOCD_PASSWORD || !CYCLOID_ORG_SLUG) {
-    throw new Error("missing configuration");
-  }
-  const org = CYCLOID_ORG_SLUG;
-  const conn = argocdConnection(org);
-  const token = await argocdLogin(conn);
-  const apps = await argocdListApps(conn, token);
+async function hardRefreshAllApps(
+  conn: ArgoConn,
+  token: string,
+  apps: ArgoApp[],
+): Promise<{ refreshed: number; failed: number }> {
   let refreshed = 0;
   let failed = 0;
   for (const app of apps) {
-    const name = app.metadata?.name ?? "";
+    const name = app.metadata?.name?.trim() ?? "";
     if (!name) continue;
     try {
       await argocdRefreshApp(conn, token, name);
@@ -612,14 +656,24 @@ async function refreshAllApps(): Promise<{ refreshed: number; failed: number }> 
       console.warn(`[WARN] refresh ${name}: ${(err as Error).message}`);
     }
   }
-  // Give the Argo CD controller a moment to reconcile after refresh.
-  await new Promise((resolve) => setTimeout(resolve, 2000));
+  if (refreshed > 0) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
   return { refreshed, failed };
 }
 
 // ─── Resync ───────────────────────────────────────────────────────────────────
 
-async function resync(): Promise<{ started: boolean; reason?: string; apps?: number; skipped?: number }> {
+async function resync(opts?: {
+  hardRefresh?: boolean;
+}): Promise<{
+  started: boolean;
+  reason?: string;
+  apps?: number;
+  skipped?: number;
+  org?: string;
+  refresh_failed?: number;
+}> {
   if (resyncRunning) return { started: false, reason: "already running" };
   if (!ARGOCD_USERNAME || !ARGOCD_PASSWORD || !CYCLOID_ORG_SLUG) {
     return { started: false, reason: "missing configuration" };
@@ -641,62 +695,55 @@ async function resync(): Promise<{ started: boolean; reason?: string; apps?: num
       apps = await argocdListApps(conn, token);
     } catch (err) {
       console.error(`[ERROR] resync ${org}: ${(err as Error).message}`);
-      return { started: false, reason: (err as Error).message };
+      return { started: false, reason: (err as Error).message, org };
     }
-    console.log(`[INFO] resync: fetched ${apps.length} apps from ArgoCD`);
+    console.log(
+      `[INFO] resync: fetched ${apps.length} app(s) from ArgoCD: ${apps.map((a) => a.metadata?.name ?? "?").join(", ")}`,
+    );
 
-    // Group apps by parsed env so we can scope the per-env wipe correctly.
+    let refreshFailed = 0;
+    if (opts?.hardRefresh) {
+      const r = await hardRefreshAllApps(conn, token, apps);
+      refreshFailed = r.failed;
+      // Re-fetch after hard refresh so status fields are current.
+      apps = await argocdListApps(conn, token);
+      console.log(
+        `[INFO] resync: re-fetched ${apps.length} app(s) after hard refresh`,
+      );
+    }
+
     const byEnv = new Map<string, Array<{ app: ArgoApp; env: string; component: string }>>();
     let skipped = 0;
     for (const app of apps) {
-      const name = app.metadata?.name ?? "";
+      const name = app.metadata?.name?.trim() ?? "";
       if (!name) {
         skipped++;
         continue;
       }
-      // Prefer parsing from metadata.name; fall back to destination.namespace.
-      const parsed =
-        parseAppName(name, org) ??
-        parseAppName(app.spec?.destination?.namespace ?? "", org);
-      if (!parsed) {
+      const mapped = mapArgoApp(app, org);
+      if (!mapped) {
         console.log(
-          `[INFO] no component mapping for app '${name}': not '${org}-…', skipping`,
+          `[INFO] no component mapping for app '${name}' (org='${org}'), skipping`,
         );
         skipped++;
         continue;
       }
-      // Resolve env when name format is <org>-<component> (no env segment).
-      // Try: ArgoCD labels → namespace parse → fallback "default".
-      let env = parsed.env;
-      if (!env) {
-        const labels = app.metadata?.labels ?? {};
-        env =
-          labels["cycloid.io/env"] ??
-          labels["env"] ??
-          labels["environment"] ??
-          "";
-      }
-      if (!env) {
-        const nsParsed = parseAppName(app.spec?.destination?.namespace ?? "", org);
-        if (nsParsed?.env) env = nsParsed.env;
-      }
-      if (!env) env = "default";
-      const list = byEnv.get(env) ?? [];
-      list.push({ app, env, component: parsed.component });
-      byEnv.set(env, list);
+      const list = byEnv.get(mapped.env) ?? [];
+      list.push(mapped);
+      byEnv.set(mapped.env, list);
     }
 
+    // Only touch SQLite after a successful ArgoCD fetch (never wipe on API failure).
     db.exec("BEGIN");
     try {
       const orgId = `org-${org}`;
       db.prepare("INSERT OR IGNORE INTO organizations (id, slug) VALUES (?, ?)").run(orgId, org);
 
-      // Wipe ALL apps for this org so deleted ArgoCD apps disappear.
-      db.prepare(
-        `DELETE FROM argocd_apps WHERE environment_id IN (
-           SELECT e.id FROM environments e WHERE e.organization_id = ?
-         )`,
-      ).run(orgId);
+      // Wipe all rows for this org (env ids always start with env-<org>-).
+      const deleted = db
+        .prepare("DELETE FROM argocd_apps WHERE environment_id LIKE ?")
+        .run(`env-${org}-%`);
+      console.log(`[INFO] resync ${org}: cleared ${deleted.changes} stale row(s)`);
 
       const insertEnv = db.prepare(
         "INSERT OR IGNORE INTO environments (id, slug, organization_id) VALUES (?, ?, ?)",
@@ -737,14 +784,20 @@ async function resync(): Promise<{ started: boolean; reason?: string; apps?: num
       console.log(
         `[INFO] resync ${org}: completed (${inserted} apps across ${byEnv.size} env(s), ${skipped} skipped)`,
       );
-      return { started: true, apps: inserted, skipped };
+      return {
+        started: true,
+        apps: inserted,
+        skipped,
+        org,
+        refresh_failed: refreshFailed,
+      };
     } catch (err) {
       db.exec("ROLLBACK");
       throw err;
     }
   } catch (err) {
     console.error(`[ERROR] resync ${org}: ${(err as Error).message}`);
-    return { started: false, reason: (err as Error).message };
+    return { started: false, reason: (err as Error).message, org };
   } finally {
     resyncRunning = false;
   }
@@ -791,28 +844,33 @@ const server = createServer((req, res) => {
     const consoleUrl = CYCLOID_ORG_SLUG
       ? argocdConsoleUrl(argocdConnection(CYCLOID_ORG_SLUG))
       : "";
-    return send(res, 200, renderAppsPage(listAppsFromDb(), consoleUrl), "text/html; charset=utf-8");
+    try {
+      return send(res, 200, renderAppsPage(listAppsFromDb(), consoleUrl), "text/html; charset=utf-8");
+    } catch (err) {
+      console.error(`[ERROR] render page: ${(err as Error).message}`);
+      return send(res, 500, `Internal error: ${(err as Error).message}`, "text/plain; charset=utf-8");
+    }
   }
 
-  if (method === "POST" && (pathname === "/api/refresh" || pathname === "api/refresh")) {
+  const pathNorm = pathname.replace(/\/$/, "");
+  if (method === "POST" && pathNorm.endsWith("/api/refresh")) {
     (async () => {
       try {
-        const refresh = await refreshAllApps();
-        const sync = await resync();
+        const sync = await resync({ hardRefresh: true });
         if (!sync.started) {
           send(res, 500, {
             ok: false,
             error: sync.reason ?? "resync failed",
-            refreshed: refresh.refreshed,
+            org: sync.org,
           });
           return;
         }
         send(res, 200, {
           ok: true,
-          refreshed: refresh.refreshed,
-          refresh_failed: refresh.failed,
           apps: sync.apps,
           skipped: sync.skipped,
+          org: sync.org,
+          refresh_failed: sync.refresh_failed,
         });
       } catch (err) {
         send(res, 500, { ok: false, error: (err as Error).message });
